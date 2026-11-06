@@ -32,6 +32,11 @@
 #include "WebUI.h"             // halaman dashboard web (INDEX_HTML), satu folder dengan .ino
 #include <LittleFS.h>            // penyimpanan PNG jejak sebelum diunggah ke GitHub
 
+// WAJIB di sini (di atas SET_LOOP_TASK_STACK_SIZE): makro itu berubah jadi definisi fungsi, sehingga Arduino
+// menaruh semua prototipe fungsi otomatis tepat di atasnya. Tipe yang dipakai di parameter/return fungsi
+// harus sudah dideklarasikan sebelum titik itu, kalau tidak -> "error: 'TrkMap' does not name a type".
+struct TrkMap { float s, cx, cy, mx, my; };   // skala, pusat jejak (meter), pusat kotak (piksel)
+
 // Perbesar stack loop() (default 8 KB). setup()/loop() memanggil HTTPClient + JSON + WiFi,
 // stack default rawan overflow -> "Stack canary watchpoint" lalu reboot terus.
 SET_LOOP_TASK_STACK_SIZE(24 * 1024);   // 24 KB: pengambilan data HTTPS (TLS) di loop() butuh stack lebih besar
@@ -450,7 +455,7 @@ float trkLastAcc = 0;
 uint32_t trkLastFixMs = 0;                    // kapan fix GPS terakhir diterima
 uint32_t trkLastAddMs = 0;
 
-struct TrkMap { float s, cx, cy, mx, my; };   // skala, pusat jejak (meter), pusat kotak (piksel)
+// (struct TrkMap dipindah ke atas, sebelum SET_LOOP_TASK_STACK_SIZE - lihat catatan di sana)
 
 // Pengaturan unggah ke GitHub (disimpan di prefs, diisi lewat dashboard)
 String ghOwner = "", ghRepo = "", ghBranch = "main", ghDir = "tracks", ghToken = "";
