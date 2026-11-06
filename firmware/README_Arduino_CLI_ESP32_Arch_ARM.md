@@ -1,398 +1,332 @@
-# Arduino CLI + ESP32 Toolchain di Arch Linux ARM
+Saya buatkan panduan pemulihan dari awal sampai akhir khusus untuk lingkungan Arch Linux ARM (aarch64) di Omulauncher, berdasarkan masalah yang tadi kita temukan.
 
-Panduan instalasi, pemulihan toolchain, kompilasi, dan pencarian
-firmware `.merged.bin` untuk **Arch Linux ARM (aarch64)** di
-Omulauncher/proot.
+Panduan ini bisa kamu simpan sebagai cadangan apabila Linux ter-reset, Arduino CLI harus dipasang ulang, atau toolchain ESP32 kembali mengalami kerusakan.
 
-> Panduan ini disusun berdasarkan lingkungan yang berhasil diuji:
->
-> -   OS: Arch Linux ARM
-> -   Arsitektur: `aarch64`
-> -   ESP32 Arduino Core: `3.3.12`
-> -   Toolchain: `esp-x32/2601`
-> -   GCC/G++: `14.2.0`
-> -   Board: ESP32 DevKit V1 (`esp32:esp32:esp32`)
-> -   Partition: `huge_app`
+### Panduan instalasi dan perbaikan Arduino CLI ESP32
 
-**Penting:** nama folder, nomor paket sementara, dan versi toolchain
-dapat berubah pada instalasi berikutnya. Jangan menganggap ID folder
-sementara selalu sama.
+Konfigurasi yang digunakan
 
-------------------------------------------------------------------------
+| Komponen    | Versi / konfigurasi |
+| ----------- | ------------------- |
+| OS          | Arch Linux ARM      |
+| Arsitektur  | aarch64 / ARM64     |
+| Arduino CLI | ARM64               |
+| ESP32 Core  | 3.3.12              |
+| Toolchain   | esp-x32 2601        |
+| GCC         | 14.2.0              |
+| Board       | ESP32 DevKit V1     |
+| Partition   | huge_app            |
+| Hasil akhir | .merged.bin         |
 
-## Daftar isi
+### Tahap 1 — Persiapan Linux
 
-1.  [Persiapan Linux](#1-persiapan-linux)
-2.  [Instal Arduino CLI](#2-instal-arduino-cli)
-3.  [Konfigurasi Arduino CLI](#3-konfigurasi-arduino-cli)
-4.  [Instal ESP32 Core](#4-instal-esp32-core)
-5.  [Periksa dan siapkan arsip
-    toolchain](#5-periksa-dan-siapkan-arsip-toolchain)
-6.  [Pulihkan broken symbolic link](#6-pulihkan-broken-symbolic-link)
-7.  [Periksa library sketch](#7-periksa-library-sketch)
-8.  [Kompilasi sketch ESP32](#8-kompilasi-sketch-esp32)
-9.  [Cari file merged.bin](#9-cari-file-mergedbin)
-10. [Script pemulihan otomatis](#10-script-pemulihan-otomatis)
-11. [Troubleshooting](#11-troubleshooting)
+Perbarui paket Linux:
 
-------------------------------------------------------------------------
+```bash
+pacman -Syu
+```
 
-## 1. Persiapan Linux
+Instal kebutuhan dasar:
+
+```bash
+pacman -S --needed curl wget git tar gzip python
+```
 
 Periksa arsitektur:
 
-``` bash
+```bash
 uname -m
 ```
 
 Hasil yang diharapkan:
 
-``` text
+```text
 aarch64
 ```
 
-Perbarui sistem:
+### Tahap 2 — Instal Arduino CLI
 
-``` bash
-pacman -Syu
-```
+Coba instal melalui repositori Arch Linux:
 
-Pasang kebutuhan dasar:
-
-``` bash
-pacman -S --needed curl wget git tar gzip python
-```
-
-## 2. Instal Arduino CLI
-
-Coba instal dari repositori yang tersedia:
-
-``` bash
+```bash
 pacman -S --needed arduino-cli
+```
+
+Periksa instalasi:
+
+```bash
+arduino-cli version
+```
+
+Jika paket `arduino-cli` tidak tersedia di repositori yang digunakan, gunakan installer resmi Arduino CLI:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/arduino/arduino-cli/master/install.sh | sh
+```
+
+Jika binary terpasang di folder `bin` lokal, tambahkan ke PATH sesuai lokasi instalasinya.
+
+### Tahap 3 — Konfigurasi Arduino CLI
+
+Buat konfigurasi:
+
+```bash
+arduino-cli config init
+```
+
+Perbarui indeks board:
+
+```bash
+arduino-cli core update-index
+```
+
+Instal ESP32 Core versi yang kita gunakan:
+
+```bash
+arduino-cli core install esp32:esp32@3.3.12
 ```
 
 Periksa:
 
-``` bash
-arduino-cli version
-```
-
-Jika paket `arduino-cli` tidak tersedia di repositori, gunakan installer
-resmi:
-
-``` bash
-curl -fsSL https://raw.githubusercontent.com/arduino/arduino-cli/master/install.sh | sh
-```
-
-Setelah instalasi, pastikan binary `arduino-cli` dapat dipanggil:
-
-``` bash
-arduino-cli version
-```
-
-Jika perintah tidak ditemukan, periksa lokasi binary hasil instalasi dan
-tambahkan foldernya ke `PATH`.
-
-## 3. Konfigurasi Arduino CLI
-
-Buat konfigurasi awal:
-
-``` bash
-arduino-cli config init
-```
-
-Perbarui indeks paket:
-
-``` bash
-arduino-cli core update-index
-```
-
-Jika `core update-index` gagal karena DNS atau koneksi, perbaiki koneksi
-jaringan/DNS Linux terlebih dahulu, lalu ulangi perintah tersebut.
-
-## 4. Instal ESP32 Core
-
-Instal versi yang digunakan pada proyek ini:
-
-``` bash
-arduino-cli core install esp32:esp32@3.3.12
-```
-
-Periksa versi yang terpasang:
-
-``` bash
+```bash
 arduino-cli core list
 ```
 
-Pastikan terlihat:
+Pastikan muncul:
 
-``` text
+```text
 esp32:esp32  3.3.12
 ```
 
-Lokasi core yang digunakan pada contoh ini:
+### Tahap 4 — Periksa arsip toolchain ESP32
 
-``` text
-/root/.arduino15/packages/esp32/hardware/esp32/3.3.12
-```
+Ini merupakan tahap penting untuk mencegah masalah sebelumnya.
 
-## 5. Periksa dan siapkan arsip toolchain
+Cari arsip toolchain:
 
-Toolchain yang digunakan pada instalasi ini adalah:
-
-``` text
-esp-x32/2601
-```
-
-Cari arsip compiler ARM64:
-
-``` bash
+```bash
 find /root/.arduino15/staging/packages \
-  -type f -name 'xtensa-esp-elf*aarch64*.tar.gz'
+-type f -name '*xtensa-esp-elf*aarch64*.tar.gz'
 ```
 
-Nama arsip yang ditemukan pada instalasi ini:
+Arsip yang kita gunakan sebelumnya:
 
-``` text
+```text
 xtensa-esp-elf-14.2.0_20260121-aarch64-linux-gnu.tar.gz
 ```
 
-Atur variabel arsip:
+Tentukan lokasi arsip:
 
-``` bash
+```bash
 A="/root/.arduino15/staging/packages/xtensa-esp-elf-14.2.0_20260121-aarch64-linux-gnu.tar.gz"
 ```
 
-Pastikan arsip tersedia:
+Pastikan file tersedia:
 
-``` bash
+```bash
 ls -lh "$A"
 ```
 
-Jika arsip tidak ada, periksa instalasi ESP32 Core dan unduhan paket
-Arduino. Jangan melanjutkan proses pemulihan dengan file arsip yang
-tidak tersedia.
+Jika file tidak ditemukan, periksa apakah instalasi ESP32 Core berhasil. Instalasi core seharusnya mengunduh toolchain yang dibutuhkan.
 
-Ekstrak ke folder pemeriksaan terpisah:
+### Tahap 5 — Ekstrak toolchain
 
-``` bash
+Buat folder pemulihan:
+
+```bash
 mkdir -p /tmp/xtensa_restore
+```
+
+Ekstrak arsip:
+
+```bash
 tar -xzf "$A" -C /tmp/xtensa_restore
+```
+
+Periksa compiler:
+
+```bash
+ls -lh /tmp/xtensa_restore/xtensa-esp-elf/bin/ | grep -E 'gcc|g\+\+'
 ```
 
 Tes compiler asli:
 
-``` bash
+```bash
 /tmp/xtensa_restore/xtensa-esp-elf/bin/xtensa-esp-elf-gcc-14.2.0 --version
 ```
 
-Hasil yang diharapkan memuat versi `14.2.0`.
+Hasil yang diharapkan:
 
-## 6. Pulihkan broken symbolic link
+```text
+xtensa-esp-elf-gcc-14.2.0
+(crosstool-NG esp-14.2.0_20260121) 14.2.0
+```
 
-### 6.1 Tentukan lokasi toolchain
+### Tahap 6 — Memperbaiki broken symbolic link
 
-``` bash
+Tahap terpenting
+
+Masalah sebelumnya adalah symbolic link compiler mengarah ke folder sementara yang sudah hilang.
+
+Contoh lokasi target yang rusak:
+
+```text
+/root/.arduino15/tmp/package-2725050860/
+```
+
+Nomor `2725050860` bisa berbeda setelah instalasi ulang. Karena itu, jangan menggunakan nomor tersebut secara permanen.
+
+Gunakan perintah otomatis berikut untuk mendeteksi lokasi target berdasarkan symbolic link yang sebenarnya:
+
+```bash
 TOOL="/root/.arduino15/packages/esp32/tools/esp-x32/2601"
-```
 
-Pastikan folder tersebut tersedia:
+LINK=$(readlink "$TOOL/bin/xtensa-esp-elf-g++")
 
-``` bash
-ls -lah "$TOOL/bin"
-```
-
-### 6.2 Periksa target symbolic link G++
-
-``` bash
-readlink "$TOOL/bin/xtensa-esp-elf-g++"
-```
-
-Pada kasus yang diperbaiki, link mengarah ke folder sementara seperti:
-
-``` text
-/root/.arduino15/tmp/package-XXXXXXXXXX/xtensa-esp-elf/bin/...
-```
-
-Angka `XXXXXXXXXX` adalah ID paket sementara dan dapat berbeda.
-
-### 6.3 Pulihkan folder target secara otomatis
-
-Ambil lokasi folder sementara dari symbolic link yang benar-benar ada:
-
-``` bash
-LINK="$(readlink "$TOOL/bin/xtensa-esp-elf-g++")"
 PKGROOT="${LINK%%/xtensa-esp-elf/*}"
 
-printf 'Target pemulihan: %s\n' "$PKGROOT"
+echo "Target pemulihan: $PKGROOT"
 ```
 
-Validasi lokasi agar tidak menyalin ke folder yang salah:
+Pastikan lokasi target berada di folder sementara Arduino:
 
-``` bash
+```bash
 case "$PKGROOT" in
   /root/.arduino15/tmp/package-*) echo "Lokasi target valid" ;;
-  *) echo "Target tidak sesuai. Hentikan proses."; exit 1 ;;
+  *) echo "Lokasi target tidak valid. Hentikan proses."; exit 1 ;;
 esac
 ```
 
-Salin kembali folder toolchain hasil ekstraksi ke lokasi target:
+Salin kembali folder toolchain dari arsip:
 
-``` bash
+```bash
 mkdir -p "$PKGROOT"
+
 cp -a /tmp/xtensa_restore/xtensa-esp-elf "$PKGROOT/"
 ```
 
-### 6.4 Tes GCC dan G++
+Dengan cara ini, target symbolic link yang sebelumnya hilang akan dipulihkan.
 
-``` bash
+### Tahap 7 — Tes compiler
+
+Jalankan:
+
+```bash
 "$TOOL/bin/xtensa-esp-elf-gcc" --version
 ```
 
-``` bash
+Lalu:
+
+```bash
 "$TOOL/bin/xtensa-esp-elf-g++" --version
 ```
 
-Keduanya harus dapat dijalankan dan menampilkan versi compiler `14.2.0`.
+Keduanya harus menampilkan versi:
 
-Periksa apakah link dapat diikuti:
+```text
+14.2.0
+```
 
-``` bash
+Periksa juga apakah symbolic link sudah aktif:
+
+```bash
 readlink -e "$TOOL/bin/xtensa-esp-elf-g++"
 ```
 
-Jika `readlink -e` mengeluarkan lokasi file, target link sudah
-ditemukan.
+Jika perintah menghasilkan lokasi file, berarti link sudah berhasil ditemukan.
 
-> **Mengapa langkah ini diperlukan?** Pada kasus sebelumnya, beberapa
-> symbolic link di direktori toolchain menunjuk ke file di
-> `/root/.arduino15/tmp/package-.../`, tetapi direktori sementara
-> tersebut sudah hilang. Akibatnya Arduino CLI tidak dapat menemukan
-> compiler. Mengembalikan folder `xtensa-esp-elf` dari arsip ke target
-> yang ditunjuk link memperbaiki masalah tersebut.
+### Tahap 8 — Instal library sketch
 
-## 7. Periksa library sketch
+Untuk sketch SmartDisplay MotoNav, library tambahan yang digunakan antara lain:
 
-Pasang library tambahan yang diperlukan proyek jika belum tersedia:
-
-``` bash
+```bash
 arduino-cli lib install "Adafruit SSD1306"
+```
+
+```bash
 arduino-cli lib install "Adafruit GFX Library"
+```
+
+```bash
 arduino-cli lib install "ArduinoJson"
+```
+
+```bash
 arduino-cli lib install "UniversalTelegramBot"
 ```
 
 Periksa library:
 
-``` bash
+```bash
 arduino-cli lib list
 ```
 
-Library seperti `WiFi`, `BluetoothSerial`, `WebServer`, `HTTPClient`,
-`Preferences`, `SPI`, dan `FS` disediakan oleh ESP32 Core.
+Catatan: `WiFi`, `BluetoothSerial`, `WebServer`, `HTTPClient`, `Preferences`, dan `SPI` sudah disediakan ESP32 Core.
 
-**Catatan versi:** log proyek sebelumnya menunjukkan
-`ArduinoJson 7.4.3`. Jika sketch atau kode proyek secara khusus
-membutuhkan ArduinoJson versi 6, pasang versi yang sesuai dengan kode,
-misalnya:
+### Tahap 9 — Compile ESP32
 
-``` bash
-arduino-cli lib install "ArduinoJson@6.21.5"
-```
+Pastikan sketch berada di:
 
-Jangan memasang beberapa versi secara manual ke folder yang sama.
-Periksa hasil `arduino-cli lib list` setelah instalasi.
-
-## 8. Kompilasi sketch ESP32
-
-Contoh lokasi sketch:
-
-``` text
+```text
 /root/ESP32_SmartDisplay_MotoNav_Combined
 ```
 
-Pastikan folder tersebut berisi file `.ino` dengan nama folder dan file
-utama yang sesuai aturan Arduino.
+Jalankan:
 
-Jalankan kompilasi:
-
-``` bash
+```bash
 arduino-cli compile \
-  --jobs 3 \
-  --fqbn esp32:esp32:esp32:PartitionScheme=huge_app \
-  --build-path /root/arduino_build \
-  --export-binaries \
-  /root/ESP32_SmartDisplay_MotoNav_Combined
+--jobs 3 \
+--fqbn esp32:esp32:esp32:PartitionScheme=huge_app \
+--build-path /root/arduino_build \
+--export-binaries \
+/root/ESP32_SmartDisplay_MotoNav_Combined
 ```
 
-Keterangan:
+Jika berhasil, biasanya akan muncul pesan:
 
--   `--jobs 3`: membatasi pekerjaan paralel agar beban RAM lebih
-    terkendali.
--   `--fqbn`: menentukan board ESP32 dan partisi `huge_app`.
--   `--build-path`: menentukan folder hasil build.
--   `--export-binaries`: meminta Arduino CLI mengekspor file binary
-    hasil kompilasi.
-
-Jika berhasil, Arduino CLI biasanya menampilkan `Done compiling.` dan
-kode keluar `0`.
-
-Periksa kode keluar segera setelah perintah compile selesai:
-
-``` bash
-echo $?
+```text
+Sketch uses ...
+Global variables use ...
 ```
 
--   `0`: perintah terakhir berhasil.
--   Selain `0`: perintah terakhir gagal.
+Diikuti pesan:
 
-Jangan menjalankan perintah lain sebelum memeriksa `echo $?`, karena
-perintah lain akan mengganti status keluar yang tersimpan.
+```text
+Done compiling.
+```
 
-## 9. Cari file merged.bin
+### Tahap 10 — Cari file firmware
 
-Cari file firmware gabungan:
+Cari file `.merged.bin`:
 
-``` bash
+```bash
 find /root/arduino_build -type f -name "*.merged.bin"
 ```
 
-Tampilkan ukuran file:
+Periksa ukuran file:
 
-``` bash
-find /root/arduino_build -type f -name "*.merged.bin" \
-  -exec ls -lh {} \;
+```bash
+find /root/arduino_build -type f -name "*.merged.bin" -exec ls -lh {} \;
 ```
 
-Jika file ditemukan, catat lokasi lengkapnya. File `.merged.bin` adalah
-hasil gabungan image firmware yang disiapkan oleh proses build untuk
-konfigurasi board tersebut.
+Jika file ditemukan, hasil firmware gabungan sudah tersedia.
 
-Jika tidak ditemukan, periksa isi folder build:
+### Bonus: Simpan perbaikan toolchain menjadi satu script
 
-``` bash
-find /root/arduino_build -maxdepth 3 -type f
-```
-
-Pastikan kompilasi benar-benar berhasil dan opsi ekspor binary
-digunakan.
-
-## 10. Script pemulihan otomatis
-
-Bagian ini membuat script `fix_xtensa.sh` untuk memulihkan folder target
-toolchain dari arsip yang sudah ada.
+Supaya tidak perlu mengetik ulang Tahap 4 sampai Tahap 7, kamu bisa membuat script otomatis bernama `fix_xtensa.sh`.
 
 Buat file:
 
-``` bash
+```bash
 nano fix_xtensa.sh
 ```
 
-Isi dengan:
+Masukkan kode berikut:
 
-``` bash
+```bash
+
 #!/bin/bash
-set -euo pipefail
+set -e
 
 echo "=================================="
 echo " ESP32 XTENSA TOOLCHAIN REPAIR"
@@ -400,164 +334,71 @@ echo "=================================="
 
 TOOL="/root/.arduino15/packages/esp32/tools/esp-x32/2601"
 ARCHIVE="/root/.arduino15/staging/packages/xtensa-esp-elf-14.2.0_20260121-aarch64-linux-gnu.tar.gz"
-RESTORE="/tmp/xtensa_restore"
 
-# Periksa direktori toolchain
-if [ ! -d "$TOOL/bin" ]; then
-    echo "[ERROR] Folder toolchain tidak ditemukan: $TOOL"
+# Cek toolchain
+if [ ! -d "$TOOL" ]; then
+    echo "[ERROR] Folder ESP32 toolchain tidak ditemukan."
     exit 1
 fi
 
-# Periksa arsip
+# Cek arsip
 if [ ! -f "$ARCHIVE" ]; then
-    echo "[ERROR] Arsip toolchain tidak ditemukan: $ARCHIVE"
+    echo "[ERROR] Arsip toolchain tidak ditemukan."
     exit 1
 fi
 
-# Baca target symbolic link
-LINK="$(readlink "$TOOL/bin/xtensa-esp-elf-g++")"
+# Ambil target symbolic link
+LINK=$(readlink "$TOOL/bin/xtensa-esp-elf-g++")
 PKGROOT="${LINK%%/xtensa-esp-elf/*}"
 
-# Validasi target
 case "$PKGROOT" in
     /root/.arduino15/tmp/package-*) ;;
     *)
-        echo "[ERROR] Target symbolic link tidak sesuai."
-        echo "Target: $PKGROOT"
+        echo "[ERROR] Target symbolic link tidak valid."
         exit 1
         ;;
 esac
 
-echo "[INFO] Target pemulihan: $PKGROOT"
+echo "[INFO] Target: $PKGROOT"
 
-# Ekstrak arsip ke folder sementara
-mkdir -p "$RESTORE"
-tar -xzf "$ARCHIVE" -C "$RESTORE"
+# Ekstrak ulang arsip
+mkdir -p /tmp/xtensa_restore
+tar -xzf "$ARCHIVE" -C /tmp/xtensa_restore
 
-# Pastikan compiler asli tersedia
-SOURCE="$RESTORE/xtensa-esp-elf"
-
-if [ ! -x "$SOURCE/bin/xtensa-esp-elf-gcc-14.2.0" ]; then
-    echo "[ERROR] Compiler asli tidak ditemukan."
-    exit 1
-fi
-
-# Pulihkan target link
+# Pulihkan folder toolchain sementara
 mkdir -p "$PKGROOT"
-cp -a "$SOURCE" "$PKGROOT/"
+cp -a /tmp/xtensa_restore/xtensa-esp-elf "$PKGROOT/"
 
 # Tes compiler
-echo
-echo "[INFO] Tes GCC:"
+echo "[INFO] Testing GCC..."
 "$TOOL/bin/xtensa-esp-elf-gcc" --version
 
-echo
-echo "[INFO] Tes G++:"
+echo "[INFO] Testing G++..."
 "$TOOL/bin/xtensa-esp-elf-g++" --version
 
-echo
 echo "=================================="
 echo " TOOLCHAIN REPAIR SUCCESS"
 echo "=================================="
 ```
 
-Simpan file, lalu beri izin eksekusi:
+Simpan dengan `CTRL + O`, Enter, lalu `CTRL + X`.
 
-``` bash
+Beri izin eksekusi:
+
+```bash
 chmod +x fix_xtensa.sh
 ```
 
-Jalankan:
+Jalankan kapan pun toolchain mengalami masalah:
 
-``` bash
+```bash
 ./fix_xtensa.sh
 ```
 
-**Batasan script:** script ini mengasumsikan versi core, nama arsip, dan
-lokasi toolchain sama dengan konfigurasi yang dicatat di panduan. Jika
-versi paket berubah, sesuaikan variabelnya dan periksa target symbolic
-link terlebih dahulu.
+Catatan penting untuk backup
 
-## 11. Troubleshooting
+Simpan juga arsip `xtensa-esp-elf-14.2.0_20260121-aarch64-linux-gnu.tar.gz` di penyimpanan HP. Jika Linux ter-reset dan cache Arduino terhapus, kamu bisa memulihkan toolchain dari arsip tersebut setelah memasang ESP32 Core versi yang sesuai.
 
-### Error: `Tool ... xtensa-esp-elf-g++ is not exist`
+Script bonus ini mengasumsikan lokasi toolchain, versi core, dan nama arsip tetap sama seperti instalasi sekarang.
 
-Penyebab yang ditemukan pada kasus ini: target symbolic link compiler
-mengarah ke folder sementara yang sudah tidak ada.
-
-Solusi: 1. Pastikan arsip toolchain tersedia. 2. Ekstrak arsip ke
-`/tmp/xtensa_restore`. 3. Baca target link dengan `readlink`. 4. Salin
-folder `xtensa-esp-elf` ke folder target yang ditunjuk link. 5. Tes GCC
-dan G++.
-
-### Error: `readlink -e` tidak menghasilkan lokasi
-
-Artinya link tidak dapat diikuti sampai file target. Periksa link:
-
-``` bash
-readlink "$TOOL/bin/xtensa-esp-elf-g++"
-```
-
-Periksa keberadaan target:
-
-``` bash
-ls -lah /root/.arduino15/tmp/
-```
-
-Lanjutkan pemulihan sesuai langkah 6.
-
-### Error: `core update-index` gagal
-
-Periksa jaringan dan DNS terlebih dahulu. Setelah koneksi normal,
-ulangi:
-
-``` bash
-arduino-cli core update-index
-```
-
-### Error: `exit status 1`
-
-Jangan langsung menyimpulkan toolchain rusak. Periksa pesan error
-pertama yang muncul sebelum `Error during build`. Penyebabnya dapat
-berupa kode sketch, library, konfigurasi board, atau toolchain.
-
-### Peringatan `--build-cache-path` deprecated
-
-Gunakan `--build-path` untuk menentukan folder hasil build. Peringatan
-deprecation tersebut sendiri bukan bukti bahwa kompilasi gagal.
-
-------------------------------------------------------------------------
-
-## Checklist pemulihan cepat
-
-Gunakan checklist ini setelah Linux di-reset:
-
--   [ ] Periksa `uname -m` menghasilkan `aarch64`.
--   [ ] Instal Arduino CLI dan cek `arduino-cli version`.
--   [ ] Jalankan `arduino-cli core update-index`.
--   [ ] Instal ESP32 Core `3.3.12`.
--   [ ] Pastikan arsip toolchain ARM64 tersedia.
--   [ ] Ekstrak arsip ke `/tmp/xtensa_restore`.
--   [ ] Pulihkan target symbolic link jika rusak.
--   [ ] Tes `xtensa-esp-elf-gcc --version`.
--   [ ] Tes `xtensa-esp-elf-g++ --version`.
--   [ ] Periksa library sketch.
--   [ ] Compile dengan FQBN dan partisi yang benar.
--   [ ] Cari file `.merged.bin`.
-
-## Catatan backup
-
-Simpan salinan arsip toolchain dan script pemulihan di penyimpanan yang
-tidak ikut terhapus ketika lingkungan Linux di-reset.
-
-Contoh lokasi backup setelah folder Android dapat diakses dari Linux:
-
-``` text
-Download/
-├── xtensa-esp-elf-14.2.0_20260121-aarch64-linux-gnu.tar.gz
-└── fix_xtensa.sh
-```
-
-Jangan mengandalkan folder `/tmp` sebagai tempat backup permanen karena
-isinya dapat hilang ketika lingkungan Linux dimulai ulang atau
-dibersihkan.
+Saran saya: simpan `fix_xtensa.sh` dan arsip toolchain di folder Download Android. Dengan begitu, kalau lingkungan Omulauncher ter-reset, kamu tidak perlu mengulang proses diagnosis broken symbolic link dari nol.
