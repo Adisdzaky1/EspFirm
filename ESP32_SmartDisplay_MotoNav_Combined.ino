@@ -32,11 +32,6 @@
 #include "WebUI.h"             // halaman dashboard web (INDEX_HTML), satu folder dengan .ino
 #include <LittleFS.h>            // penyimpanan PNG jejak sebelum diunggah ke GitHub
 
-// WAJIB di sini (di atas SET_LOOP_TASK_STACK_SIZE): makro itu berubah jadi definisi fungsi, sehingga Arduino
-// menaruh semua prototipe fungsi otomatis tepat di atasnya. Tipe yang dipakai di parameter/return fungsi
-// harus sudah dideklarasikan sebelum titik itu, kalau tidak -> "error: 'TrkMap' does not name a type".
-struct TrkMap { float s, cx, cy, mx, my; };   // skala, pusat jejak (meter), pusat kotak (piksel)
-
 // Perbesar stack loop() (default 8 KB). setup()/loop() memanggil HTTPClient + JSON + WiFi,
 // stack default rawan overflow -> "Stack canary watchpoint" lalu reboot terus.
 SET_LOOP_TASK_STACK_SIZE(24 * 1024);   // 24 KB: pengambilan data HTTPS (TLS) di loop() butuh stack lebih besar
@@ -58,6 +53,7 @@ SET_LOOP_TASK_STACK_SIZE(24 * 1024);   // 24 KB: pengambilan data HTTPS (TLS) di
 #define NAV_MODE_ID      1
 
 #define BT_DEVICE_NAME  "ESP32 Navigation"
+
 
 const char* ntpServer = "pool.ntp.org";
 const long gmtOffset_sec = 7 * 3600;     // WIB
@@ -455,7 +451,7 @@ float trkLastAcc = 0;
 uint32_t trkLastFixMs = 0;                    // kapan fix GPS terakhir diterima
 uint32_t trkLastAddMs = 0;
 
-// (struct TrkMap dipindah ke atas, sebelum SET_LOOP_TASK_STACK_SIZE - lihat catatan di sana)
+struct TrkMap { float s, cx, cy, mx, my; };   // skala, pusat jejak (meter), pusat kotak (piksel)
 
 // Pengaturan unggah ke GitHub (disimpan di prefs, diisi lewat dashboard)
 String ghOwner = "", ghRepo = "", ghBranch = "main", ghDir = "tracks", ghToken = "";
@@ -629,14 +625,46 @@ unsigned long deepSleepReqMs = 0;
 uint32_t deepSleepPrevCpuMhz = 240;
 volatile bool botNetBusy = false;            // true selama task bot sedang akses jaringan
 
+// Pengambilan data online (cuaca, prakiraan, sholat, emas, unggah GitHub) dan pindah WiFi cadangan
+// dikerjakan di TASK TERPISAH (core 0) supaya loop() / OLED / web TIDAK PERNAH tertahan oleh jaringan.
+SemaphoreHandle_t strMx = nullptr;            // kunci singkat untuk String yang ditulis task & dibaca loop()
+SemaphoreHandle_t tlsMx = nullptr;            // hanya satu koneksi TLS (task data online ATAU bot Telegram) sekaligus
+struct StrLock {
+  StrLock() { if (strMx) xSemaphoreTake(strMx, portMAX_DELAY); }
+  ~StrLock() { if (strMx) xSemaphoreGive(strMx); }
+};
+volatile bool reqNtpSync = false;             // minta task menyinkronkan jam
+volatile bool reqWifiFailover = false;        // minta task mencoba WiFi tersimpan lainnya
+volatile bool wifiBusy = false;               // task sedang berganti WiFi: loop() jangan ikut mengutak-atik WiFi
+volatile bool tgWeatherReq = false;           // /cuaca dari Telegram menunggu hasil
+TaskHandle_t onlineTaskHandle = nullptr;
+
 // ═══════════════════════════════════════════════════════════
 // SETUP
 // ═══════════════════════════════════════════════════════════
+// Penyebab restart terakhir (untuk melacak crash: PANIC / TASK_WDT / BROWNOUT, dll.)
+const char *resetReasonText() {
+  switch (esp_reset_reason()) {
+    case ESP_RST_POWERON:   return "POWERON (dicolok / tombol reset)";
+    case ESP_RST_SW:        return "SW (restart oleh program)";
+    case ESP_RST_PANIC:     return "PANIC (crash program)";
+    case ESP_RST_INT_WDT:   return "INT_WDT (watchdog interrupt)";
+    case ESP_RST_TASK_WDT:  return "TASK_WDT (task macet)";
+    case ESP_RST_WDT:       return "WDT (watchdog)";
+    case ESP_RST_BROWNOUT:  return "BROWNOUT (tegangan turun - cek kabel/charger)";
+    case ESP_RST_DEEPSLEEP: return "DEEPSLEEP";
+    default:                return "LAINNYA";
+  }
+}
+
 void setup() {
   Serial.begin(115200);
   delay(100);
 
   Serial.println("[BOOT] ESP32 SmartDisplay + MotoNav start");
+  strMx = xSemaphoreCreateMutex();
+  tlsMx = xSemaphoreCreateMutex();
+  Serial.printf("[BOOT] Alasan reset: %s\n", resetReasonText());
   randomSeed(esp_random());
 
   pinMode(BUZZER_PIN, OUTPUT);
@@ -688,6 +716,7 @@ void setup() {
     }
   }
 
+  xTaskCreatePinnedToCore(onlineTask, "OnlineFetch", 16384, NULL, 1, &onlineTaskHandle, 0);
   Serial.println("[BOOT] Setup selesai");
 }
 
@@ -808,8 +837,8 @@ void loop() {
         if (apActive) stopEmergencyAP();
         if ((!webStarted || !staInitDone) && !alarmSleepMode) {
           Serial.println("[WIFI] Connected, starting web server");
-          syncNTP();
-          fetchWeatherFromAPI();
+          reqNtpSync = true;              // sinkron jam & cuaca dikerjakan task latar belakang
+          nextWeatherAt = 0;
           if (!webStarted) startWebServer();
           staInitDone = true;
           if (!botTaskStarted) setupTelegramBot();      // bot ikut menyala walau WiFi baru tersambung setelah boot
@@ -821,12 +850,12 @@ void loop() {
       } else {
         staInitDone = false;
         if (wifiDownSince == 0) wifiDownSince = millis();
-        if (millis() - lastWiFiRetryMs > wifiRetryIntervalMs) {
+        if (!wifiBusy && millis() - lastWiFiRetryMs > wifiRetryIntervalMs) {
           lastWiFiRetryMs = millis();
           wifiRetryCount++;
           if (!apActive && wifiListN > 1 && wifiRetryCount % 3 == 0) {
             Serial.println("[WIFI] Coba WiFi tersimpan lainnya");   // pindah otomatis ke WiFi cadangan
-            connectBestSavedWifi(true);
+            reqWifiFailover = true;                   // dikerjakan task latar belakang (tidak membekukan OLED)
           } else {
             Serial.println("[WIFI] Retry reconnect");
             if (wifiRetryCount % 2 == 1) {
@@ -856,8 +885,6 @@ void loop() {
       updateAutoMode();
 
       if (webStarted) server.handleClient();
-      updateOnlineData();      // prakiraan / jadwal sholat / harga emas / cuaca berkala
-      updateTrackUpload();     // unggah PNG jejak yang tertunda ke GitHub
 
       if (oledSleepState) {
         setDisplayOn(false);
@@ -1407,15 +1434,17 @@ bool fetchWeatherFromAPI() {
   wHumid = cur["humidity"] | 0.0f;
   wFeels = cur["feelslike_c"] | 0.0f;
   wWind = cur["wind_kph"] | 0.0f;
-  wDesc = String((const char*)(cur["condition"]["text"] | "N/A"));
+  { StrLock l; wDesc = String((const char*)(cur["condition"]["text"] | "N/A")); }
   weatherValid = true;
 
   struct tm t;
   if (getLocalTime(&t, 5)) {
     char buf[8];
     snprintf(buf, sizeof(buf), "%02d:%02d", t.tm_hour, t.tm_min);
+    StrLock l;
     wLastUpdate = String(buf);
   } else {
+    StrLock l;
     wLastUpdate = "--:--";
   }
 
@@ -1581,8 +1610,8 @@ bool connectBestSavedWifi(bool show) {
     int i = order[k];
     Serial.println("[WIFI] Coba: " + wifiListSsid[i]);
     if (wifiTryConnect(wifiListSsid[i], wifiListPass[i], 12000, show)) {
-      wifiSSID = wifiListSsid[i];
-      wifiPASS = wifiListPass[i];
+      if (wifiSSID != wifiListSsid[i]) wifiSSID = wifiListSsid[i];
+      if (wifiPASS != wifiListPass[i]) wifiPASS = wifiListPass[i];
       return true;
     }
   }
@@ -1923,7 +1952,7 @@ bool fetchGoldPrice() {
   if (getLocalTime(&lt, 5)) {
     char buf[8];
     snprintf(buf, sizeof(buf), "%02d:%02d", lt.tm_hour, lt.tm_min);
-    goldLast = String(buf);
+    { StrLock l; goldLast = String(buf); }
   }
   goldPushHist(gram);
   saveGoldToPrefs();
@@ -1945,16 +1974,28 @@ String fmtRupiah(uint32_t v) {
 }
 
 // Dipanggil dari loop(): maksimal satu pengambilan data per panggilan, hanya saat layar tidak sibuk
+// ── Akses String bersama yang aman antar task ──
+String getWDesc()      { StrLock l; return wDesc; }
+String getWLast()      { StrLock l; return wLastUpdate; }
+String getGoldLast()   { StrLock l; return goldLast; }
+String getTrkStatus()  { StrLock l; return trkStatus; }
+void setTrkStatus(const String &v) { StrLock l; trkStatus = v; }
+
 void updateOnlineData() {
   if (deepSleepMode || deepSleepPending || wifiValidating || WiFi.status() != WL_CONNECTED) return;
   if (gameActive || toolActive || prayerAlertActive) return;
   if (buzzerSirenActive || buzzerPatternActive || tmBeeping) return;
-  if (botNetBusy) return;
-  if (ESP.getFreeHeap() < 70000) return;
+  if (ESP.getFreeHeap() < 70000 || heap_caps_get_largest_free_block(MALLOC_CAP_8BIT) < 30000) return;
   if (!timeIsSynced()) return;
 
   if (dueAt(nextWeatherAt)) {
-    if (!fetchWeatherFromAPI()) nextWeatherAt = millis() + 90000UL;
+    bool ok = fetchWeatherFromAPI();
+    if (!ok) nextWeatherAt = millis() + 90000UL;
+    if (tgWeatherReq) {
+      tgWeatherReq = false;
+      if (ok) sendOwnerMessage("🌤️ " + getWDesc() + ", " + String(wTemp, 1) + "C, kelembapan " + String(wHumid, 0) + "%, update " + getWLast());
+      else sendOwnerMessage("Gagal ambil data cuaca (cek koneksi WiFi).");
+    }
     return;
   }
   if (dueAt(nextFcAt)) {
@@ -1971,6 +2012,29 @@ void updateOnlineData() {
     bool ok = fetchGoldPrice();
     nextGoldAt = millis() + (ok ? 900000UL : 90000UL);
     return;
+  }
+}
+
+
+// Task latar belakang (core 0, sama seperti task Telegram): semua operasi jaringan yang bisa memakan waktu
+void onlineTask(void *pv) {
+  for (;;) {
+    if (systemMode == WIFI_MODE && !deepSleepMode) {
+      if (reqWifiFailover) {                               // pindah ke WiFi tersimpan lain tanpa membekukan OLED
+        reqWifiFailover = false;
+        wifiBusy = true;
+        bool ok = connectBestSavedWifi(false);
+        wifiBusy = false;
+        if (ok) { wifiDownSince = 0; wifiRetryCount = 0; }
+      }
+      if (WiFi.status() == WL_CONNECTED && !alarmSleepMode && tlsMx && xSemaphoreTake(tlsMx, 0) == pdTRUE) {
+        if (reqNtpSync) { reqNtpSync = false; syncNTP(); }
+        updateOnlineData();
+        updateTrackUpload();
+        xSemaphoreGive(tlsMx);
+      }
+    }
+    vTaskDelay(pdMS_TO_TICKS(700));
   }
 }
 
@@ -2091,7 +2155,7 @@ void connectWiFiFromPrefs(bool showBootMessages) {
     if (apActive) stopEmergencyAP();
     syncNTP();
     updateTimeFromNTP();
-    fetchWeatherFromAPI();
+    nextWeatherAt = 0;                // cuaca diambil task latar belakang
     startWebServer();
     wifiStarted = true;
     staInitDone = true;
@@ -2223,8 +2287,8 @@ void handleWebStatus() {
   doc["humidity"] = wHumid;
   doc["feels"] = wFeels;
   doc["wind"] = wWind;
-  doc["desc"] = wDesc;
-  doc["last"] = wLastUpdate;
+  doc["desc"] = getWDesc();
+  doc["last"] = getWLast();
   doc["ip"] = (WiFi.status() != WL_CONNECTED && apActive) ? WiFi.softAPIP().toString() : WiFi.localIP().toString();
   doc["rssi"] = (WiFi.status() == WL_CONNECTED) ? WiFi.RSSI() : -999;
   doc["alarm_en"] = alarmEnabled;
@@ -2267,15 +2331,16 @@ void handleWebAuto() {
 }
 
 void handleWebWeather() {
-  bool ok = fetchWeatherFromAPI();
+  nextWeatherAt = 0;                 // diambil di task latar belakang; yang tampil di sini data terakhir
+  bool ok = weatherValid;
   StaticJsonDocument<256> doc;
   doc["ok"] = ok;
   doc["temp"] = wTemp;
   doc["humidity"] = wHumid;
   doc["feels"] = wFeels;
   doc["wind"] = wWind;
-  doc["desc"] = wDesc;
-  doc["last"] = wLastUpdate;
+  doc["desc"] = getWDesc();
+  doc["last"] = getWLast();
   String out;
   serializeJson(doc, out);
   server.send(ok ? 200 : 500, "application/json", out);
@@ -2419,7 +2484,7 @@ void handleWebFeat() {
   g["xau"] = goldXauUsd;
   g["fx"] = goldUsdIdr;
   g["adj"] = goldAdjPct;
-  g["last"] = goldLast;
+  g["last"] = getGoldLast();
   JsonArray h = g.createNestedArray("h");
   for (int i = 0; i < goldHistCount; i++) h.add((uint32_t)(goldRatio(goldHist[i]) + 0.5));
 
@@ -2447,14 +2512,14 @@ void handleWebPrayer() {
 }
 
 void handleWebPrayerRefresh() {
-  bool ok = fetchPrayerTimes();
-  server.send(ok ? 200 : 500, "text/plain", ok ? "OK" : "Gagal ambil jadwal sholat");
+  prayerYmd = 0;                     // paksa ambil ulang (dikerjakan task latar belakang)
+  nextPrayerAt = 0;
+  server.send(200, "text/plain", "OK");
 }
 
 void handleWebForecastRefresh() {
-  bool ok = fetchForecast();
-  nextFcAt = millis() + (ok ? 3600000UL : 300000UL);
-  server.send(ok ? 200 : 500, "text/plain", ok ? "OK" : "Gagal ambil prakiraan");
+  nextFcAt = 0;                      // dikerjakan task latar belakang
+  server.send(200, "text/plain", "OK");
 }
 
 void handleWebGold() {
@@ -2462,12 +2527,8 @@ void handleWebGold() {
     goldAdjPct = constrain(server.arg("adj").toFloat(), -50.0f, 50.0f);
     prefs.putFloat("goldAdj", goldAdjPct);
   }
-  bool ok = true;
-  if (server.hasArg("refresh") && server.arg("refresh") == "1") {
-    ok = fetchGoldPrice();
-    nextGoldAt = millis() + (ok ? 900000UL : 180000UL);
-  }
-  server.send(ok ? 200 : 500, "text/plain", ok ? "OK" : "Gagal ambil harga emas");
+  if (server.hasArg("refresh") && server.arg("refresh") == "1") nextGoldAt = 0;   // dikerjakan task latar belakang
+  server.send(200, "text/plain", "OK");
 }
 
 void handleWebWifis() {
@@ -2727,7 +2788,7 @@ void drawWeatherScreen() {
 
   // ── Deskripsi cuaca ─────────────────────────
   display.setTextSize(1);
-  String desc = wDesc;
+  String desc = getWDesc();
   if (desc.length() > 20) desc = desc.substring(0, 20);
   display.setCursor(0, 44);
   display.print(desc);
@@ -2745,7 +2806,7 @@ void drawWeatherScreen() {
   // ── Update time pojok kanan bawah ───────────
   display.setCursor(80, 54);
   display.print("Upd ");
-  display.print(wLastUpdate);
+  display.print(getWLast());
 
   display.display();
 }
@@ -2893,7 +2954,7 @@ void drawGoldScreen() {
   display.setTextSize(1);
   display.setCursor(0, 33);
   display.print("Upd ");
-  display.print(goldLast);
+  display.print(getGoldLast());
   if (goldOpenGram > 0) {
     double pct = (goldRawGram - goldOpenGram) / goldOpenGram * 100.0;
     char b[12];
@@ -3380,22 +3441,30 @@ bool trkFsInit() {
 
 // Hitung PNG yang menunggu diunggah (nama diawali "trk_", berakhiran ".png")
 void trkScanPending() {
-  trkPending = 0;
-  trkFilesN = 0;
-  if (!trkFsInit()) return;
-  File root = LittleFS.open("/");
-  if (!root) return;
-  File f = root.openNextFile();
-  while (f) {
-    String n = f.name();
-    int sl = n.lastIndexOf('/');
-    if (sl >= 0) n = n.substring(sl + 1);
-    if (n.startsWith("trk_") && n.endsWith(".png")) {
-      trkPending++;
-      if (trkFilesN < 8) trkFiles[trkFilesN++] = n;
+  String tmp[8];
+  int tn = 0, cnt = 0;
+  if (trkFsInit()) {
+    File root = LittleFS.open("/");
+    if (root) {
+      File f = root.openNextFile();
+      while (f) {
+        String n = f.name();
+        int sl = n.lastIndexOf('/');
+        if (sl >= 0) n = n.substring(sl + 1);
+        if (n.startsWith("trk_") && n.endsWith(".png")) {
+          cnt++;
+          if (tn < 8) tmp[tn++] = n;
+        }
+        f = root.openNextFile();
+      }
     }
-    f = root.openNextFile();
   }
+  {
+    StrLock l;
+    for (int i = 0; i < tn; i++) trkFiles[i] = tmp[i];
+    trkFilesN = tn;
+  }
+  trkPending = cnt;
 }
 
 String trkSanitize(String s) {
@@ -3522,25 +3591,25 @@ void updateTrackUpload() {
   if (!dueAt(nextTrkUpAt)) return;
   if (trkPending < 0) trkScanPending();
   if (trkPending == 0) { nextTrkUpAt = millis() + 60000UL; return; }
-  if (ESP.getFreeHeap() < 60000) { nextTrkUpAt = millis() + 15000UL; return; }
+  if (ESP.getFreeHeap() < 60000 || heap_caps_get_largest_free_block(MALLOC_CAP_8BIT) < 30000) { nextTrkUpAt = millis() + 15000UL; return; }
   if (ghOwner.length() == 0 || ghRepo.length() == 0 || ghToken.length() == 0) {
-    trkStatus = "Isi pengaturan GitHub agar jejak terunggah";
+    setTrkStatus("Isi pengaturan GitHub agar jejak terunggah");
     nextTrkUpAt = millis() + 120000UL;
     return;
   }
   String name = trkFiles[0];
   if (name.length() == 0) { trkScanPending(); return; }
   String err;
-  trkStatus = "Mengunggah " + name + "...";
+  setTrkStatus("Mengunggah " + name + "...");
   if (trkUploadOne(name, err)) {
     LittleFS.remove("/" + name);
-    trkStatus = "Terunggah: " + name;
+    setTrkStatus("Terunggah: " + name);
     String url = "https://github.com/" + ghOwner + "/" + ghRepo + "/blob/" + ghBranch + "/" + (ghDir.length() ? ghDir + "/" : String("")) + name;
     if (botTaskStarted) sendOwnerMessage("📍 Jejak terunggah ke GitHub:\n" + url);
     trkScanPending();
     nextTrkUpAt = millis() + 3000UL;
   } else {
-    trkStatus = "Gagal: " + err;
+    setTrkStatus("Gagal: " + err);
     nextTrkUpAt = millis() + 300000UL;           // coba lagi 5 menit kemudian (atau tekan "Unggah sekarang")
   }
 }
@@ -3582,7 +3651,7 @@ void trkFinish() {
   trkPts = nullptr;
   trkScreen = false;
   trkMaster = false;
-  trkStatus = "PNG dibuat, menunggu WiFi: " + name;
+  setTrkStatus("PNG dibuat, menunggu WiFi: " + name);
   trkPending = -1;
   nextTrkUpAt = 0;
   bootScreen("Jejak disimpan", "Pindah ke WiFi...");
@@ -3768,7 +3837,6 @@ void pollNavButtons() {
 
 // ── Web: status & pengaturan pelacak ──
 void handleWebTrk() {
-  if (trkPending < 0) trkScanPending();
   DynamicJsonDocument doc(1536);
   doc["owner"] = ghOwner;
   doc["repo"] = ghRepo;
@@ -3777,12 +3845,12 @@ void handleWebTrk() {
   doc["phone"] = trkPhone;
   doc["tokenSet"] = ghToken.length() > 0;
   doc["pending"] = trkPending < 0 ? 0 : trkPending;
-  doc["status"] = trkStatus;
+  doc["status"] = getTrkStatus();
   doc["n"] = trkN;
   doc["dist"] = (int)trkDist;
   doc["rec"] = trkRec;
   JsonArray fs = doc.createNestedArray("files");
-  for (int i = 0; i < trkFilesN; i++) fs.add(trkFiles[i]);
+  { StrLock l; for (int i = 0; i < trkFilesN; i++) fs.add(trkFiles[i]); }
   String out;
   serializeJson(doc, out);
   server.send(200, "application/json", out);
@@ -3813,7 +3881,7 @@ void handleWebTrkCfg() {
 void handleWebTrkUp() {
   nextTrkUpAt = 0;
   trkPending = -1;
-  trkStatus = "Menunggu giliran unggah...";
+  setTrkStatus("Menunggu giliran unggah...");
   server.send(200, "text/plain", "OK");
 }
 
@@ -3824,7 +3892,8 @@ void handleWebTrkDel() {
     return;
   }
   LittleFS.remove("/" + f);
-  trkScanPending();
+  trkPending = -1;                  // dipindai ulang oleh task latar belakang
+  nextTrkUpAt = 0;
   server.send(200, "text/plain", "OK");
 }
 
@@ -4382,7 +4451,7 @@ void setupTelegramBot() {
 // ═══════════════════════════════════════════════════════════
 void telegramBotTask(void *pvParameters) {
   for (;;) {
-    if (!deepSleepMode && WiFi.status() == WL_CONNECTED) {
+    if (!deepSleepMode && WiFi.status() == WL_CONNECTED && tlsMx && xSemaphoreTake(tlsMx, 0) == pdTRUE) {
       botNetBusy = true;
       // ── Kirim pesan keluar yang sedang antre ──────────────
       BotOutgoingMsg outMsg;
@@ -4402,6 +4471,7 @@ void telegramBotTask(void *pvParameters) {
         numNewMessages = bot.getUpdates(bot.last_message_received + 1);
       }
       botNetBusy = false;
+      xSemaphoreGive(tlsMx);
     }
     vTaskDelay(pdMS_TO_TICKS(botPollIntervalMs));
   }
@@ -4606,6 +4676,7 @@ void processBotCommand(const String &chatIdIn, const String &textIn) {
   // ── /status ─────────────────────────────────────────
   if (text.equalsIgnoreCase("/status")) {
     String msg = "📊 STATUS\n";
+    msg += String("Restart terakhir: ") + resetReasonText() + "\n";
     msg += "Waktu: " + formatTimeString() + "\n";
     msg += "Tanggal: " + formatDateString() + "\n";
     msg += "Mode: " + getCurrentModeText() + "\n";
@@ -4619,13 +4690,8 @@ void processBotCommand(const String &chatIdIn, const String &textIn) {
 
   // ── /cuaca ──────────────────────────────────────────
   if (text.equalsIgnoreCase("/cuaca")) {
-    bool ok = fetchWeatherFromAPI();
-    if (ok) {
-      sendOwnerMessage("🌤️ " + wDesc + ", " + String(wTemp, 1) + "C, kelembapan " +
-                        String(wHumid, 0) + "%, update " + wLastUpdate);
-    } else {
-      sendOwnerMessage("Gagal ambil data cuaca (cek koneksi WiFi).");
-    }
+    tgWeatherReq = true;              // dijawab setelah task latar belakang selesai mengambil data
+    nextWeatherAt = 0;
     return;
   }
 
