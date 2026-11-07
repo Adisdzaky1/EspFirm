@@ -28,9 +28,17 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/queue.h>
 #include <freertos/task.h>
+#include <freertos/semphr.h>
+#include <esp_heap_caps.h>
+#include <esp_system.h>
 #include "EyeGifs.h"            // data animasi mata (file harus ada satu folder dengan .ino)
 #include "WebUI.h"             // halaman dashboard web (INDEX_HTML), satu folder dengan .ino
 #include <LittleFS.h>            // penyimpanan PNG jejak sebelum diunggah ke GitHub
+
+// Tipe data pelacak jejak: harus di sini (sebelum semua prototipe fungsi) agar bisa dipakai di tanda tangan fungsi
+struct TrkPt { float x, y; };                 // meter dari titik awal (x = timur, y = utara)
+struct TrkMap { float s, cx, cy, mx, my; };   // skala, pusat jejak (meter), pusat kotak (piksel)
+
 
 // Perbesar stack loop() (default 8 KB). setup()/loop() memanggil HTTPClient + JSON + WiFi,
 // stack default rawan overflow -> "Stack canary watchpoint" lalu reboot terus.
@@ -433,7 +441,6 @@ double goldHist[GOLD_HIST_N];                // riwayat (mentah), 1 titik per ~1
 int goldHistCount = 0;
 unsigned long goldHistLastMs = 0;
 
-struct TrkPt { float x, y; };                 // meter dari titik awal (x = timur, y = utara)
 const int TRK_MAX = 1500;                     // maks titik di RAM (penuh -> titik dijarangkan separuh)
 const float TRK_MAX_ACC = 35.0f;              // fix GPS dengan akurasi lebih buruk dari ini diabaikan (m)
 const float TRK_MAX_SPEED = 70.0f;            // lompatan lebih cepat dari ini dianggap GPS error (m/s)
@@ -451,7 +458,6 @@ float trkLastAcc = 0;
 uint32_t trkLastFixMs = 0;                    // kapan fix GPS terakhir diterima
 uint32_t trkLastAddMs = 0;
 
-struct TrkMap { float s, cx, cy, mx, my; };   // skala, pusat jejak (meter), pusat kotak (piksel)
 
 // Pengaturan unggah ke GitHub (disimpan di prefs, diisi lewat dashboard)
 String ghOwner = "", ghRepo = "", ghBranch = "main", ghDir = "tracks", ghToken = "";
