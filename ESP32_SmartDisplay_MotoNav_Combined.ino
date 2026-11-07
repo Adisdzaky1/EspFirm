@@ -53,7 +53,7 @@ SET_LOOP_TASK_STACK_SIZE(24 * 1024);   // 24 KB: pengambilan data HTTPS (TLS) di
 #define NAV_MODE_ID      1
 
 #define BT_DEVICE_NAME  "ESP32 Navigation"
-
+#define TRK_PHONE_DEFAULT "08:10:93:38:97:24"   // alamat Bluetooth HP penyedia GPS (bisa diubah di dashboard)
 
 const char* ntpServer = "pool.ntp.org";
 const long gmtOffset_sec = 7 * 3600;     // WIB
@@ -463,7 +463,7 @@ int trkPending = -1;                          // jumlah PNG menunggu unggah (-1 
 String trkFiles[8];
 int trkFilesN = 0;
 unsigned long nextTrkUpAt = 0;
-String trkPhone = "";                         // HP penyedia GPS: alamat Bluetooth (AA:BB:CC:DD:EE:FF) atau nama Bluetooth HP
+String trkPhone = TRK_PHONE_DEFAULT;                         // HP penyedia GPS: alamat Bluetooth (AA:BB:CC:DD:EE:FF) atau nama Bluetooth HP
 bool trkMaster = false;                       // ESP32 sedang jadi "klien" Bluetooth yang menyambung ke HP
 bool trkConnecting = false;
 uint32_t trkLastTry = 0;
@@ -569,6 +569,15 @@ struct Btn {
   bool takeDouble() { bool v = dbl;     dbl = false;     return v; }
 };
 Btn btn(PIN_BTN);
+
+// Tombol dibaca tiap 5 ms oleh task sendiri, bukan oleh loop() yang kadang lambat (gambar OLED, dll),
+// supaya klik singkat tidak terlewat.
+void btnTask(void *pv) {
+  for (;;) {
+    btn.update();
+    vTaskDelay(pdMS_TO_TICKS(5));
+  }
+}
 
 // ── Mini Games: state ───────────────────────────────────────
 Preferences gamePrefs;                       // namespace terpisah dari "motonav"
@@ -676,6 +685,7 @@ void setup() {
   ledcAttach(BUZZER_PIN, 2000, 8); // pin, base freq 2000Hz, resolusi 8-bit
 
   btn.begin();
+  xTaskCreatePinnedToCore(btnTask, "Btn", 3072, NULL, 2, NULL, 1);   // prioritas di atas loop() supaya klik tidak terlewat
 
 
   Wire.begin(SDA_PIN, SCL_PIN);
@@ -1339,7 +1349,7 @@ void loadPrefs() {
   ghBranch = prefs.getString("ghBranch", "main");
   ghDir    = prefs.getString("ghDir", "tracks");
   ghToken  = prefs.getString("ghToken", "");
-  trkPhone = prefs.getString("trkPhone", "");
+  trkPhone = prefs.getString("trkPhone", TRK_PHONE_DEFAULT);
   loadOnlineCache();
   wifiListLoad();
   Serial.println("[BOOT] Preferences loaded");
@@ -2253,7 +2263,7 @@ void enterNavMode() {
   if (!btEnabled) {
     SerialBT.begin(BT_DEVICE_NAME);
     btEnabled = true;
-    Serial.println("[BT] SerialBT started as MotoNav");
+    Serial.println("[BT] SerialBT started as " BT_DEVICE_NAME);
   }
 
   clearNavState();
@@ -2262,7 +2272,7 @@ void enterNavMode() {
   systemMode = NAV_MODE;
   saveModeToPrefs(NAV_MODE);
   saveSystemSettings();
-  bootScreen("MotoNav Aktif", "BT: MotoNav");
+  bootScreen("MotoNav Aktif", "BT: " BT_DEVICE_NAME);
   setDisplayOn(true);
 }
 
@@ -3706,10 +3716,14 @@ void nmeaParse(const String &s) {
 
 // Ganti peran Bluetooth: on = klien (menyambung ke HP), off = kembali jadi "MotoNav" untuk aplikasi navigasi
 void trkBtMaster(bool on) {
+  if (SerialBT.hasClient() || SerialBT.connected()) {     // putuskan HP yang sedang tersambung dulu, baru matikan Bluetooth
+    SerialBT.disconnect();
+    delay(600);
+  }
   SerialBT.end();
   delay(300);
   if (on) {
-    SerialBT.begin("MotoNav-Track", true);
+    SerialBT.begin(BT_DEVICE_NAME, true);
     trkMaster = true;
   } else {
     SerialBT.begin(BT_DEVICE_NAME);
@@ -3808,7 +3822,6 @@ void drawTrackScreen() {
 // Tombol di mode NAV (sebelumnya tidak dipakai): 2x klik buka/tutup layar jejak;
 // di layar jejak: klik = mulai/jeda rekam, tahan = selesai (hanya saat jeda) -> PNG -> GitHub
 void pollNavButtons() {
-  btn.update();
   bool dbl = btn.takeDouble(), lng = btn.takeLong(), sgl = btn.takeSingle();
   btn.take(); btn.takeClick(); btn.takeTriple();
   if (!trkScreen) {
@@ -3931,7 +3944,7 @@ void drawNavWaitingScreen() {
   display.print("Bluetooth...");
   display.drawLine(0, 40, 128, 40, SSD1306_WHITE);
   display.setCursor(4, 46);
-  display.print("Nama: " BT_DEVICE_NAME);
+  display.print("BT: " BT_DEVICE_NAME);
   display.setCursor(4, 56);
   display.print("Pair di HP Anda");
   display.display();
@@ -4752,7 +4765,6 @@ void processBotCommand(const String &chatIdIn, const String &textIn) {
 //   Timer/Stopwatch: lihat toolLoop()
 // Deteksi 3x klik berjalan terpisah dari fungsi game, jadi fungsi tombol di game tidak berubah.
 void pollButtons() {
-  btn.update();
 
   // Alarm sedang berbunyi: 1x tekan tombol langsung mematikannya. Sisa gesture tombol itu
   // (lepas / klik tertunda) dibuang sebentar supaya tidak ikut memicu fungsi lain.
