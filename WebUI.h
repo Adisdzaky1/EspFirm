@@ -453,11 +453,11 @@ $('ghSave').addEventListener('click',function(){var b=new URLSearchParams();['gh
 fetch('/trkcfg',{method:'POST',body:b,cache:'no-store'}).then(function(r){if(!r.ok)throw 0;toast('Pengaturan GitHub disimpan');ghDirty=false;$('ghToken').value='';return loadTrk()}).catch(function(){toast('Perangkat tidak merespons','bad')})});
 $('trkUp').addEventListener('click',function(){get('/trkup').then(function(r){if(!r.ok)throw 0;toast('Unggah dijadwalkan');return loadTrk()}).catch(function(){toast('Perangkat tidak merespons','bad')})});
 $('trkFiles').addEventListener('click',function(e){var b=e.target.closest('button');if(!b||!b.hasAttribute('data-trkdel'))return;var f=b.getAttribute('data-trkdel');ask('Hapus file jejak?',f+' dihapus dari ESP32 (belum terunggah).','Hapus').then(function(ok){if(!ok)return;get('/trkdel?f='+encodeURIComponent(f)).then(function(r){if(!r.ok)throw 0;toast('File dihapus');loadTrk()}).catch(function(){toast('Perangkat tidak merespons','bad')})})});
-function start(){poll();clearInterval(timer);timer=setInterval(function(){if(!halted)poll()},1000)}
+function start(){poll();clearInterval(timer);timer=setInterval(function(){if(!halted&&!document.hidden)poll()},2000)}
 document.querySelectorAll('.sec').forEach(function(s,i){s.style.setProperty('--n',i)});
 fetch('/status',{cache:'no-store'}).then(function(r){if(!r.ok)throw 0;return r.json()}).then(function(){demo=false}).catch(function(){demo=true}).then(function(){
 if(demo)$('foot').textContent='Mode pratinjau: data contoh, belum terhubung ke ESP32.';
-pr();start();loadFeat();loadWifis();loadTrk();setInterval(loadTrk,10000);setInterval(loadFeat,20000);setInterval(loadWifis,6000);document.body.classList.add('go')});
+pr();start();loadFeat();loadWifis();loadTrk();setInterval(function(){if(!document.hidden)loadTrk()},15000);setInterval(function(){if(!document.hidden)loadFeat()},30000);setInterval(function(){if(!document.hidden)loadWifis()},20000);document.body.classList.add('go')});
 })();
 </script>
 </body>

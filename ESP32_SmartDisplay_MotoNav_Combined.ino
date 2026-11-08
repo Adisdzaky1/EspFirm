@@ -732,7 +732,7 @@ void setup() {
     }
   }
 
-  xTaskCreatePinnedToCore(onlineTask, "OnlineFetch", 16384, NULL, 1, &onlineTaskHandle, 0);
+  xTaskCreatePinnedToCore(onlineTask, "OnlineFetch", 12288, NULL, 1, &onlineTaskHandle, 0);
   Serial.println("[BOOT] Setup selesai");
 }
 
@@ -769,6 +769,16 @@ void handleRuntimeSerial() {
 }
 
 void loop() {
+  static unsigned long sysLastMs = 0, sysIterStart = 0, sysMaxLoop = 0;
+  unsigned long sysNow = millis();
+  if (sysIterStart && sysNow - sysIterStart > sysMaxLoop) sysMaxLoop = sysNow - sysIterStart;
+  sysIterStart = sysNow;
+  if (sysNow - sysLastMs >= 10000UL) {                    // log diagnostik tiap 10 dtk (lihat di Serial Monitor)
+    sysLastMs = sysNow;
+    Serial.printf("[SYS] heap=%u min=%u blok=%u loopMax=%lums\n", (unsigned)ESP.getFreeHeap(),
+                  (unsigned)ESP.getMinFreeHeap(), (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT), sysMaxLoop);
+    sysMaxLoop = 0;
+  }
   updateBuzzerTask();
   handleRuntimeSerial();
   updateTimeFromNTP();
@@ -913,6 +923,8 @@ void loop() {
       } else {
         drawSmartDisplay();
       }
+      if (webStarted) server.handleClient();   // layani web sekali lagi setelah menggambar OLED (respons lebih cepat)
+      delay(1);                                // beri waktu task WiFi/latar, hindari loop memutar tanpa henti
     }
     // else: OLED dan web dashboard sengaja dibiarkan mati,
     // hanya menunggu alarm bunyi atau command /bangun dari Telegram
@@ -1706,10 +1718,10 @@ bool timeIsSynced() { return time(nullptr) > 1700000000; }
 bool httpsGetJsonOnce(const String &url, JsonDocument &doc, JsonDocument &filter) {
   WiFiClientSecure cl;
   cl.setInsecure();
-  cl.setTimeout(10);                          // detik: batas tunggu data saat membaca
+  cl.setTimeout(8);                          // detik: batas tunggu data saat membaca
   HTTPClient http;
-  http.setConnectTimeout(8000);
-  http.setTimeout(10000);
+  http.setConnectTimeout(6000);
+  http.setTimeout(8000);
   http.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
   http.useHTTP10(true);                       // hindari chunked supaya bisa di-stream
   http.setUserAgent("ESP32-SmartDisplay/1.0");
@@ -1736,14 +1748,14 @@ bool httpsGetJsonOnce(const String &url, JsonDocument &doc, JsonDocument &filter
   return true;
 }
 
-// Dicoba sampai 3x supaya gangguan WiFi sesaat (DNS/handshake timeout) tidak langsung dianggap gagal
+// Dicoba sampai 2x supaya gangguan WiFi sesaat tidak langsung dianggap gagal (tidak lebih, agar tidak menahan memori TLS lama)
 bool httpsGetJson(const String &url, JsonDocument &doc, JsonDocument &filter) {
-  for (int attempt = 1; attempt <= 3; attempt++) {
+  for (int attempt = 1; attempt <= 2; attempt++) {
     if (WiFi.status() != WL_CONNECTED) return false;
     doc.clear();
     if (httpsGetJsonOnce(url, doc, filter)) return true;
-    Serial.printf("[NET] Gagal (percobaan %d/3)\n", attempt);
-    delay(700 * attempt);
+    Serial.printf("[NET] Gagal (percobaan %d/2)\n", attempt);
+    vTaskDelay(pdMS_TO_TICKS(600 * attempt));
   }
   return false;
 }
