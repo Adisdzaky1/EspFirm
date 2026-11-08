@@ -651,7 +651,7 @@ void setup() {
   ledcAttach(BUZZER_PIN, 2000, 8); // pin, base freq 2000Hz, resolusi 8-bit
 
   btn.begin();
-  xTaskCreatePinnedToCore(btnTask, "Btn", 3072, NULL, 2, NULL, 1);   // prioritas di atas loop() supaya klik tidak terlewat
+  xTaskCreatePinnedToCore(btnTask, "Btn", 4096, NULL, 2, NULL, 1);   // prioritas di atas loop() supaya klik tidak terlewat
 
 
   Wire.begin(SDA_PIN, SCL_PIN);
@@ -669,6 +669,13 @@ void setup() {
   loadWeatherFromPrefs();
 
   bootScreen("Booting ESP32...", "Mohon tunggu");
+  {
+    esp_reset_reason_t rr = esp_reset_reason();        // tampilkan penyebab restart di OLED bila bukan nyala/reset biasa
+    if (rr == ESP_RST_PANIC || rr == ESP_RST_INT_WDT || rr == ESP_RST_TASK_WDT || rr == ESP_RST_WDT || rr == ESP_RST_BROWNOUT) {
+      bootScreen("Restart tak normal", rr == ESP_RST_PANIC ? "PANIC (crash)" : rr == ESP_RST_BROWNOUT ? "BROWNOUT (daya)" : "WATCHDOG (macet)");
+      delay(4000);
+    }
+  }
   delay(700);
 
   systemMode = (SystemMode)readModeFromPrefs();
@@ -689,7 +696,7 @@ void setup() {
     enterWiFiMode();
   }
 
-  xTaskCreatePinnedToCore(onlineTask, "OnlineFetch", 12288, NULL, 1, &onlineTaskHandle, 0);
+  xTaskCreatePinnedToCore(onlineTask, "OnlineFetch", 16384, NULL, 1, &onlineTaskHandle, 0);
   Serial.println("[BOOT] Setup selesai");
 }
 
@@ -732,8 +739,9 @@ void loop() {
   sysIterStart = sysNow;
   if (sysNow - sysLastMs >= 10000UL) {                    // log diagnostik tiap 10 dtk (lihat di Serial Monitor)
     sysLastMs = sysNow;
-    Serial.printf("[SYS] heap=%u min=%u blok=%u loopMax=%lums\n", (unsigned)ESP.getFreeHeap(),
-                  (unsigned)ESP.getMinFreeHeap(), (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT), sysMaxLoop);
+    Serial.printf("[SYS] heap=%u min=%u blok=%u loopMax=%lums stackSisa loop=%u online=%u\n", (unsigned)ESP.getFreeHeap(),
+                  (unsigned)ESP.getMinFreeHeap(), (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT), sysMaxLoop,
+                  (unsigned)uxTaskGetStackHighWaterMark(NULL), onlineTaskHandle ? (unsigned)uxTaskGetStackHighWaterMark(onlineTaskHandle) : 0u);
     sysMaxLoop = 0;
   }
   updateBuzzerTask();
