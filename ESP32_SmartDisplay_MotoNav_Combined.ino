@@ -2013,7 +2013,11 @@ void updateOnlineData() {
   if (deepSleepMode || deepSleepPending || wifiValidating || WiFi.status() != WL_CONNECTED) return;
   if (gameActive || toolActive || prayerAlertActive) return;
   if (buzzerSirenActive || buzzerPatternActive || tmBeeping) return;
-  if (ESP.getFreeHeap() < 70000 || heap_caps_get_largest_free_block(MALLOC_CAP_8BIT) < 30000) return;
+  if (ESP.getFreeHeap() < 45000 || heap_caps_get_largest_free_block(MALLOC_CAP_8BIT) < 28000) {
+    static unsigned long lastWarn = 0;
+    if (millis() - lastWarn > 30000UL) { lastWarn = millis(); Serial.printf("[NET] Ditunda, memori kurang: heap=%u blok=%u\n", (unsigned)ESP.getFreeHeap(), (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT)); }
+    return;
+  }
   if (!timeIsSynced()) return;
 
   if (dueAt(nextWeatherAt)) {
@@ -2371,7 +2375,7 @@ void handleWebWeather() {
   doc["last"] = getWLast();
   String out;
   serializeJson(doc, out);
-  server.send(ok ? 200 : 500, "application/json", out);
+  server.send(200, "application/json", out);   // selalu 200: data baru diambil task latar, "ok" menandakan sudah ada data
 }
 
 void handleWebBrightness() {
@@ -3619,7 +3623,7 @@ void updateTrackUpload() {
   if (!dueAt(nextTrkUpAt)) return;
   if (trkPending < 0) trkScanPending();
   if (trkPending == 0) { nextTrkUpAt = millis() + 60000UL; return; }
-  if (ESP.getFreeHeap() < 60000 || heap_caps_get_largest_free_block(MALLOC_CAP_8BIT) < 30000) { nextTrkUpAt = millis() + 15000UL; return; }
+  if (ESP.getFreeHeap() < 45000 || heap_caps_get_largest_free_block(MALLOC_CAP_8BIT) < 28000) { nextTrkUpAt = millis() + 15000UL; return; }
   if (ghOwner.length() == 0 || ghRepo.length() == 0 || ghToken.length() == 0) {
     setTrkStatus("Isi pengaturan GitHub agar jejak terunggah");
     nextTrkUpAt = millis() + 120000UL;
