@@ -24,7 +24,6 @@
 #include <Preferences.h>
 #include <time.h>
 #include <WiFiClientSecure.h>
-#include <UniversalTelegramBot.h>   // Library: "Universal Telegram Bot Library" by Brian Lough
 #include <freertos/FreeRTOS.h>
 #include <freertos/queue.h>
 #include <freertos/task.h>
@@ -72,10 +71,6 @@ const char* weatherApiKey   = "9cefcc6eb6564c29aa611710261805";
 const char* weatherLocation  = "Arcawinangun";
 const char* cityDisplay      = "Banyumas";
 
-// Telegram Bot config
-#define BOT_TOKEN      "8966511363:AAFao22yeim9O-fRqZT5OOuqwWYW7UnX87w"
-#define OWNER_CHAT_ID  "5987304194"   // dari @userinfobot
-
 // ═══════════════════════════════════════════════════════════
 // OBJEK GLOBAL
 // ═══════════════════════════════════════════════════════════
@@ -83,8 +78,6 @@ Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
 BluetoothSerial SerialBT;
 WebServer server(80);
 Preferences prefs;
-WiFiClientSecure botSecuredClient;
-UniversalTelegramBot bot(BOT_TOKEN, botSecuredClient);
 
 // ═══════════════════════════════════════════════════════════
 // PROTOTYPES
@@ -199,19 +192,7 @@ void loadSystemSettings();
 
 void processWebEndpointsCommentary();
 
-// ── Telegram Bot & Alarm Sleep Mode ─────────────────────────
-void setupTelegramBot();
-void telegramBotTask(void *pvParameters);
-void processTelegramIncoming();
-void processBotCommand(const String &chatId, const String &text);
-void enterAlarmSleepMode();
-void exitAlarmSleepMode();
 bool parseHHMM(const String &s, int &hOut, int &mOut);
-void sendOwnerMessage(const String &text);
-void sendReplyMessage(const String &chatId, const String &text);
-void handleModeCommand(const String &arg);
-void handleBrightnessCommand(const String &arg);
-void handleSleepWindowCommand(const String &arg);
 
 // ── Tombol fisik, Mini Games & Deep Sleep ───────────────────
 void pollButtons();
@@ -329,23 +310,7 @@ int alarmHour = 7;
 int alarmMin = 0;
 int alarmLastTriggeredYMD = -1;
 
-// Telegram bot / alarm sleep mode
-struct BotIncomingMsg {
-  char chatId[32];
-  char text[220];
-};
-struct BotOutgoingMsg {
-  char chatId[32];
-  char text[420];
-};
 
-QueueHandle_t botIncomingQueue = NULL;
-QueueHandle_t botOutgoingQueue = NULL;
-TaskHandle_t  botTaskHandle    = NULL;
-bool botTaskStarted = false;
-
-bool alarmSleepMode = false;              // true = mode hemat daya aktif (dipicu /alarm)
-const unsigned long botPollIntervalMs = 1500;
 
 // Buzzer pattern
 bool buzzerPatternActive = false;
@@ -398,8 +363,7 @@ const unsigned long AP_FALLBACK_MS = 60000;  // WiFi putus selama ini -> AP daru
 String wifiLastResult = "";                  // "ok:<ssid>" / "fail:<ssid>" (hasil validasi WiFi terakhir)
 unsigned long wifiDownSince = 0;
 uint8_t wifiRetryCount = 0;
-bool staInitDone = false;                    // sync NTP / cuaca / web / bot sudah dijalankan untuk koneksi ini
-bool apClosedMsgPending = false;
+bool staInitDone = false;                    // sync NTP / cuaca / web sudah dijalankan untuk koneksi ini
 
 // ── Prakiraan cuaca 5 hari + UV + kualitas udara (Open-Meteo, tanpa API key) ──
 struct FcDay { int8_t tmax, tmin; uint8_t pop, uv10, code, wday, mon, dom; };
@@ -632,18 +596,16 @@ Pipe pipes[3];
 uint32_t fScore, fFrame;
 
 // ── Deep Sleep (hanya berlaku di WIFI_MODE) ─────────────────
-// Matikan WiFi, web server & bot Telegram. OLED + jam tetap jalan,
+// Matikan WiFi & web server. OLED + jam tetap jalan,
 // data terakhir (cuaca dll) tetap dipakai. Keluar: 3x klik cepat tombol GPIO 4.
 volatile bool deepSleepMode = false;
-bool deepSleepPending = false;               // menunggu pesan Telegram terakhir terkirim
+bool deepSleepPending = false;               // menunggu balasan web terkirim
 unsigned long deepSleepReqMs = 0;
 uint32_t deepSleepPrevCpuMhz = 240;
-volatile bool botNetBusy = false;            // true selama task bot sedang akses jaringan
 
 // Pengambilan data online (cuaca, prakiraan, sholat, emas, unggah GitHub) dan pindah WiFi cadangan
 // dikerjakan di TASK TERPISAH (core 0) supaya loop() / OLED / web TIDAK PERNAH tertahan oleh jaringan.
 SemaphoreHandle_t strMx = nullptr;            // kunci singkat untuk String yang ditulis task & dibaca loop()
-SemaphoreHandle_t tlsMx = nullptr;            // hanya satu koneksi TLS (task data online ATAU bot Telegram) sekaligus
 struct StrLock {
   StrLock() { if (strMx) xSemaphoreTake(strMx, portMAX_DELAY); }
   ~StrLock() { if (strMx) xSemaphoreGive(strMx); }
@@ -651,7 +613,6 @@ struct StrLock {
 volatile bool reqNtpSync = false;             // minta task menyinkronkan jam
 volatile bool reqWifiFailover = false;        // minta task mencoba WiFi tersimpan lainnya
 volatile bool wifiBusy = false;               // task sedang berganti WiFi: loop() jangan ikut mengutak-atik WiFi
-volatile bool tgWeatherReq = false;           // /cuaca dari Telegram menunggu hasil
 TaskHandle_t onlineTaskHandle = nullptr;
 
 // ═══════════════════════════════════════════════════════════
@@ -678,7 +639,6 @@ void setup() {
 
   Serial.println("[BOOT] ESP32 SmartDisplay + MotoNav start");
   strMx = xSemaphoreCreateMutex();
-  tlsMx = xSemaphoreCreateMutex();
   Serial.printf("[BOOT] Alasan reset: %s\n", resetReasonText());
   randomSeed(esp_random());
 
@@ -727,9 +687,6 @@ void setup() {
   } else {
     Serial.println("[BOOT] Last mode = WIFI_MODE");
     enterWiFiMode();
-    if (WiFi.status() == WL_CONNECTED) {
-      setupTelegramBot();
-    }
   }
 
   xTaskCreatePinnedToCore(onlineTask, "OnlineFetch", 12288, NULL, 1, &onlineTaskHandle, 0);
@@ -861,17 +818,12 @@ void loop() {
         wifiDownSince = 0;
         wifiRetryCount = 0;
         if (apActive) stopEmergencyAP();
-        if ((!webStarted || !staInitDone) && !alarmSleepMode) {
+        if ((!webStarted || !staInitDone)) {
           Serial.println("[WIFI] Connected, starting web server");
           reqNtpSync = true;              // sinkron jam & cuaca dikerjakan task latar belakang
           nextWeatherAt = 0;
           if (!webStarted) startWebServer();
           staInitDone = true;
-          if (!botTaskStarted) setupTelegramBot();      // bot ikut menyala walau WiFi baru tersambung setelah boot
-          if (apClosedMsgPending) {
-            apClosedMsgPending = false;
-            sendOwnerMessage("📶 WiFi tersambung: " + wifiSSID + "\nIP: " + WiFi.localIP().toString());
-          }
         }
       } else {
         staInitDone = false;
@@ -896,16 +848,13 @@ void loop() {
       }
     }
 
-    // Ambil pesan yang sudah difetch task Telegram (non-blocking, cepat)
-    processTelegramIncoming();
-
-    // Alarm checker HARUS tetap jalan walau alarmSleepMode aktif
+    // Alarm checker
     updateAlarmState();
     timerTick();               // timer tetap berjalan & berbunyi walau OLED sedang menampilkan hal lain
     updatePrayerReminder();    // pengingat sholat memakai jadwal tersimpan (jalan juga saat Deep Sleep)
     updatePrayerAlert();
 
-    if (!alarmSleepMode) {
+    {
       updateSleepState();
       applyBrightnessForTime();
       updateAutoMode();
@@ -926,8 +875,6 @@ void loop() {
       if (webStarted) server.handleClient();   // layani web sekali lagi setelah menggambar OLED (respons lebih cepat)
       delay(1);                                // beri waktu task WiFi/latar, hindari loop memutar tanpa henti
     }
-    // else: OLED dan web dashboard sengaja dibiarkan mati,
-    // hanya menunggu alarm bunyi atau command /bangun dari Telegram
   } else {
     pollNavButtons();
     updateNavMode();
@@ -1259,16 +1206,12 @@ void applyBrightnessForTime() {
 
 void updateAlarmState() {
   if (!alarmEnabled) return;
-  if (oledSleepState && !alarmSleepMode) return;
+  if (oledSleepState) return;
   if (curHour == alarmHour && curMin == alarmMin && curSec < 3) {
     int ymd = curYear * 10000 + curMon * 100 + curDay;
     if (alarmLastTriggeredYMD != ymd) {
       alarmLastTriggeredYMD = ymd;
       Serial.println("[ALARM] Triggered");
-      if (alarmSleepMode) {
-        exitAlarmSleepMode();
-        sendOwnerMessage("⏰ Alarm bunyi! Sistem kembali normal.");
-      }
       startAlarmSiren(60000); // bunyi 1 menit penuh
     }
   }
@@ -1575,7 +1518,6 @@ void stopEmergencyAP() {
   if (!apActive) return;
   WiFi.softAPdisconnect(true);        // matikan AP saja, koneksi STA tetap
   apActive = false;
-  apClosedMsgPending = true;
   Serial.println("[AP] Darurat dimatikan (WiFi tersambung)");
 }
 
@@ -2023,11 +1965,6 @@ void updateOnlineData() {
   if (dueAt(nextWeatherAt)) {
     bool ok = fetchWeatherFromAPI();
     if (!ok) nextWeatherAt = millis() + 90000UL;
-    if (tgWeatherReq) {
-      tgWeatherReq = false;
-      if (ok) sendOwnerMessage("🌤️ " + getWDesc() + ", " + String(wTemp, 1) + "C, kelembapan " + String(wHumid, 0) + "%, update " + getWLast());
-      else sendOwnerMessage("Gagal ambil data cuaca (cek koneksi WiFi).");
-    }
     return;
   }
   if (dueAt(nextFcAt)) {
@@ -2048,7 +1985,7 @@ void updateOnlineData() {
 }
 
 
-// Task latar belakang (core 0, sama seperti task Telegram): semua operasi jaringan yang bisa memakan waktu
+// Task latar belakang (core 0, core 0): semua operasi jaringan yang bisa memakan waktu
 void onlineTask(void *pv) {
   for (;;) {
     if (systemMode == WIFI_MODE && !deepSleepMode) {
@@ -2059,11 +1996,10 @@ void onlineTask(void *pv) {
         wifiBusy = false;
         if (ok) { wifiDownSince = 0; wifiRetryCount = 0; }
       }
-      if (WiFi.status() == WL_CONNECTED && !alarmSleepMode && tlsMx && xSemaphoreTake(tlsMx, 0) == pdTRUE) {
+      if (WiFi.status() == WL_CONNECTED) {
         if (reqNtpSync) { reqNtpSync = false; syncNTP(); }
         updateOnlineData();
         updateTrackUpload();
-        xSemaphoreGive(tlsMx);
       }
     }
     vTaskDelay(pdMS_TO_TICKS(700));
@@ -2114,7 +2050,7 @@ void updatePrayerAlert() {
 }
 
 void updatePrayerReminder() {
-  if (!prayerReminderOn || !prayerValid || alarmSleepMode || prayerAlertActive) return;
+  if (!prayerReminderOn || !prayerValid || prayerAlertActive) return;
   if (!timeIsSynced()) return;
   if (time(nullptr) - (time_t)prayerEpoch > 7L * 86400L) return;   // jadwal terlalu lama tidak diperbarui
   int nowMin = curHour * 60 + curMin;
@@ -2262,9 +2198,6 @@ void enterWiFiMode() {
   saveSystemSettings();
   setDisplayOn(true);
   applyBrightnessForTime();
-  if (WiFi.status() == WL_CONNECTED) {
-    setupTelegramBot();
-  }
 }
 
 void enterNavMode() {
@@ -3116,9 +3049,13 @@ void drawRobotEyesScreen() {
     }
   }
 
-  uint16_t delayMs = eyeDecodeNextFrame();
-  memcpy(display.getBuffer(), eyeBuf, sizeof(eyeBuf));
-  display.display();
+  uint16_t delayMs = eyeDecodeNextFrame();      // frame tetap didekode semua (delta) supaya kecepatan animasi sama
+  static unsigned long eyeLastShowMs = 0;
+  if (delayMs >= 100 || now - eyeLastShowMs >= 100) {   // batas tampil sekitar 10 fps, frame cepat (60 ms) dilewati bergantian
+    memcpy(display.getBuffer(), eyeBuf, sizeof(eyeBuf));
+    display.display();
+    eyeLastShowMs = now;
+  }
   eyeNextMs = now + delayMs;
 }
 
@@ -3618,7 +3555,7 @@ bool trkUploadOne(const String &name, String &err) {
 // Dipanggil dari loop() (mode WiFi): unggah satu PNG tertunda saat WiFi tersambung dan perangkat idle
 void updateTrackUpload() {
   if (deepSleepMode || WiFi.status() != WL_CONNECTED || wifiValidating) return;
-  if (gameActive || toolActive || prayerAlertActive || botNetBusy) return;
+  if (gameActive || toolActive || prayerAlertActive) return;
   if (buzzerSirenActive || buzzerPatternActive || tmBeeping) return;
   if (!dueAt(nextTrkUpAt)) return;
   if (trkPending < 0) trkScanPending();
@@ -3636,8 +3573,6 @@ void updateTrackUpload() {
   if (trkUploadOne(name, err)) {
     LittleFS.remove("/" + name);
     setTrkStatus("Terunggah: " + name);
-    String url = "https://github.com/" + ghOwner + "/" + ghRepo + "/blob/" + ghBranch + "/" + (ghDir.length() ? ghDir + "/" : String("")) + name;
-    if (botTaskStarted) sendOwnerMessage("📍 Jejak terunggah ke GitHub:\n" + url);
     trkScanPending();
     nextTrkUpAt = millis() + 3000UL;
   } else {
@@ -4447,94 +4382,8 @@ void updateNavMode() {
 }
 
 // ═══════════════════════════════════════════════════════════
-// TELEGRAM BOT + ALARM-TRIGGERED POWER-SAVE MODE
+// UTILITAS WAKTU
 // ═══════════════════════════════════════════════════════════
-void setupTelegramBot() {
-  if (botTaskStarted) return;  // jangan buat task dobel kalau dipanggil ulang
-
-  botSecuredClient.setInsecure();  // skip cert validation, hemat memori
-
-  botIncomingQueue = xQueueCreate(6, sizeof(BotIncomingMsg));
-  botOutgoingQueue = xQueueCreate(6, sizeof(BotOutgoingMsg));
-
-  if (botIncomingQueue == NULL || botOutgoingQueue == NULL) {
-    Serial.println("[BOT] Gagal membuat queue, bot tidak diaktifkan");
-    return;
-  }
-
-  // Task Telegram dijalankan di CORE 0 (loop() utama tetap di core 1),
-  // supaya network call yang blocking (getUpdates/sendMessage) TIDAK PERNAH
-  // menghentikan update OLED, jam, dan animasi robot.
-  xTaskCreatePinnedToCore(
-    telegramBotTask,
-    "TelegramBot",
-    16384,   // TLS handshake butuh stack besar; 8192 rawan overflow
-    NULL,
-    1,
-    &botTaskHandle,
-    0
-  );
-
-  botTaskStarted = true;
-  Serial.println("[BOT] Telegram bot task dimulai di core 0");
-  sendOwnerMessage("🤖 ESP32 SmartDisplay online.\nMode: " + getCurrentModeText());
-}
-
-// ═══════════════════════════════════════════════════════════
-// TASK TERPISAH — semua network I/O Telegram terjadi di sini,
-// TIDAK PERNAH mengakses OLED/I2C secara langsung.
-// ═══════════════════════════════════════════════════════════
-void telegramBotTask(void *pvParameters) {
-  for (;;) {
-    if (!deepSleepMode && WiFi.status() == WL_CONNECTED && tlsMx && xSemaphoreTake(tlsMx, 0) == pdTRUE) {
-      botNetBusy = true;
-      // ── Kirim pesan keluar yang sedang antre ──────────────
-      BotOutgoingMsg outMsg;
-      while (xQueueReceive(botOutgoingQueue, &outMsg, 0) == pdTRUE) {
-        bot.sendMessage(String(outMsg.chatId), String(outMsg.text), "");
-      }
-
-      // ── Ambil pesan masuk baru ─────────────────────────────
-      int numNewMessages = bot.getUpdates(bot.last_message_received + 1);
-      while (numNewMessages) {
-        for (int i = 0; i < numNewMessages; i++) {
-          BotIncomingMsg inMsg;
-          bot.messages[i].chat_id.toCharArray(inMsg.chatId, sizeof(inMsg.chatId));
-          bot.messages[i].text.toCharArray(inMsg.text, sizeof(inMsg.text));
-          xQueueSend(botIncomingQueue, &inMsg, 0);
-        }
-        numNewMessages = bot.getUpdates(bot.last_message_received + 1);
-      }
-      botNetBusy = false;
-      xSemaphoreGive(tlsMx);
-    }
-    vTaskDelay(pdMS_TO_TICKS(botPollIntervalMs));
-  }
-}
-
-// ── Dipanggil dari loop() utama — cuma ambil dari queue, CEPAT & non-blocking
-void processTelegramIncoming() {
-  if (botIncomingQueue == NULL) return;
-  BotIncomingMsg msg;
-  while (xQueueReceive(botIncomingQueue, &msg, 0) == pdTRUE) {
-    processBotCommand(String(msg.chatId), String(msg.text));
-  }
-}
-
-void sendOwnerMessage(const String &text) {
-  if (WiFi.status() != WL_CONNECTED) return;
-  if (botOutgoingQueue == NULL) return;
-  sendReplyMessage(String(OWNER_CHAT_ID), text);
-}
-
-void sendReplyMessage(const String &chatId, const String &text) {
-  if (botOutgoingQueue == NULL) return;
-  BotOutgoingMsg outMsg;
-  chatId.toCharArray(outMsg.chatId, sizeof(outMsg.chatId));
-  text.toCharArray(outMsg.text, sizeof(outMsg.text));
-  xQueueSend(botOutgoingQueue, &outMsg, 0);
-}
-
 bool parseHHMM(const String &s, int &hOut, int &mOut) {
   int col = s.indexOf(':');
   if (col < 1) return false;
@@ -4547,230 +4396,6 @@ bool parseHHMM(const String &s, int &hOut, int &mOut) {
   if (h < 0 || h > 23 || m < 0 || m > 59) return false;
   hOut = h; mOut = m;
   return true;
-}
-
-void enterAlarmSleepMode() {
-  if (alarmSleepMode) return;
-  alarmSleepMode = true;
-  gameActive = false;
-  autoMode = false;
-  setDisplayOn(false);
-  stopWebServer();
-  Serial.println("[ALARM-SLEEP] Mode hemat daya AKTIF");
-}
-
-void exitAlarmSleepMode() {
-  if (!alarmSleepMode) return;
-  alarmSleepMode = false;
-  setDisplayOn(true);
-  applyBrightnessForTime();
-  startWebServer();
-  Serial.println("[ALARM-SLEEP] Mode hemat daya NONAKTIF, sistem normal kembali");
-}
-
-void handleModeCommand(const String &arg) {
-  String a = arg; a.trim(); a.toLowerCase();
-  int val = -1;
-  if (a == "jam" || a == "clock")        val = 0;
-  else if (a == "cuaca" || a == "weather") val = 1;
-  else if (a == "wajah" || a == "face")    val = 2;
-  else if (a == "info")                    val = 3;
-  else if (a == "prakiraan" || a == "forecast") val = 4;
-  else if (a == "sholat" || a == "shalat")  val = 5;
-  else if (a == "emas" || a == "gold")      val = 6;
-
-  if (val < 0) {
-    sendOwnerMessage("Format salah. Pilihan: jam, cuaca, wajah, info, prakiraan, sholat, emas");
-    return;
-  }
-  displayMode = (uint8_t)val;
-  autoMode = false;
-  saveSystemSettings();
-  sendOwnerMessage("🖥️ Mode OLED diganti ke: " + a);
-}
-
-void handleBrightnessCommand(const String &arg) {
-  String a = arg; a.trim();
-  int val = a.toInt();
-  if (a.length() == 0 || val < 0 || val > 255) {
-    sendOwnerMessage("Format salah. Contoh: /brightness 180 (0-255)");
-    return;
-  }
-  manualBrightness = val;
-  autoBrightness = false;
-  saveSystemSettings();
-  if (!alarmSleepMode) applyOLEDContrast((uint8_t)manualBrightness);
-  sendOwnerMessage("💡 Brightness manual diset ke: " + String(val));
-}
-
-void handleSleepWindowCommand(const String &arg) {
-  // Format: /sleep HH:MM HH:MM  (mulai, selesai)
-  String a = arg; a.trim();
-  int sp = a.indexOf(' ');
-  if (sp < 1) {
-    sendOwnerMessage("Format salah. Contoh: /sleep 22:00 06:00");
-    return;
-  }
-  String startStr = a.substring(0, sp);
-  String endStr   = a.substring(sp + 1);
-  startStr.trim(); endStr.trim();
-
-  int sh, sm, eh, em;
-  if (!parseHHMM(startStr, sh, sm) || !parseHHMM(endStr, eh, em)) {
-    sendOwnerMessage("Format salah. Contoh: /sleep 22:00 06:00");
-    return;
-  }
-  sleepStartHour = sh;
-  sleepStartMin  = sm;
-  sleepEndHour   = eh;
-  sleepEndMin    = em;
-  sleepEnabled   = true;
-  saveSystemSettings();
-  char buf[20];
-  snprintf(buf, sizeof(buf), "%02d:%02d-%02d:%02d", sh, sm, eh, em);
-  sendOwnerMessage("😴 Jendela auto-sleep OLED diset: " + String(buf));
-}
-
-void processBotCommand(const String &chatIdIn, const String &textIn) {
-  String chatId = chatIdIn;
-
-  // Whitelist: abaikan chat selain owner
-  if (chatId != OWNER_CHAT_ID) {
-    sendReplyMessage(chatId, "⛔ Akses ditolak.");
-    return;
-  }
-
-  String text = textIn;
-  text.trim();
-  Serial.println("[BOT] RX: " + text);
-
-  // ── /alarm HH:MM atau /alarm off ───────────────────────
-  if (text.startsWith("/alarm")) {
-    String arg = text.substring(6);
-    arg.trim();
-
-    if (arg.equalsIgnoreCase("off")) {
-      alarmEnabled = false;
-      saveSystemSettings();
-      exitAlarmSleepMode();
-      sendOwnerMessage("🔕 Alarm dibatalkan. Sistem kembali normal.");
-      return;
-    }
-
-    int h, m;
-    if (parseHHMM(arg, h, m)) {
-      alarmHour = h;
-      alarmMin  = m;
-      alarmEnabled = true;
-      alarmLastTriggeredYMD = -1;  // penting: reset supaya alarm baru bisa bunyi
-                                    // walau masih di tanggal yang sama dengan
-                                    // alarm sebelumnya yang sudah pernah bunyi
-      saveSystemSettings();
-      enterAlarmSleepMode();
-      char buf[8];
-      snprintf(buf, sizeof(buf), "%02d:%02d", h, m);
-      sendOwnerMessage("⏰ Alarm diset jam " + String(buf) +
-                        ".\n💤 Sistem masuk mode hemat daya (OLED off, dashboard off).\n" +
-                        "Kirim /bangun untuk keluar manual, atau /alarm off untuk batalkan.");
-    } else {
-      sendOwnerMessage("Format salah. Contoh: /alarm 06:30  atau  /alarm off");
-    }
-    return;
-  }
-
-  // ── /bangun — keluar sleep mode & matikan siren jika masih bunyi ───
-  if (text.equalsIgnoreCase("/bangun")) {
-    bool didSomething = false;
-    if (buzzerSirenActive) {
-      stopAlarmSiren();
-      didSomething = true;
-    }
-    if (alarmSleepMode) {
-      exitAlarmSleepMode();
-      didSomething = true;
-    }
-    if (didSomething) {
-      sendOwnerMessage("☀️ Oke, siren dimatikan & keluar dari mode hemat daya. Alarm tetap aktif jika masih diset.");
-    } else {
-      sendOwnerMessage("Sistem memang sedang tidak dalam mode hemat daya.");
-    }
-    return;
-  }
-
-  // ── /deepsleep — matikan WiFi/web/bot, OLED & jam tetap jalan ───
-  if (text.equalsIgnoreCase("/deepsleep")) {
-    if (requestDeepSleep()) {
-      sendOwnerMessage("💤 Deep sleep diaktifkan. WiFi, web & bot dimatikan.\n"
-                       "OLED & jam tetap jalan. Keluar: klik tombol GPIO 4 tiga kali cepat.");
-    } else {
-      sendOwnerMessage("Deep sleep tidak bisa diaktifkan sekarang (cek: mode hemat daya alarm / validasi WiFi?).");
-    }
-    return;
-  }
-
-  // ── /status ─────────────────────────────────────────
-  if (text.equalsIgnoreCase("/status")) {
-    String msg = "📊 STATUS\n";
-    msg += String("Restart terakhir: ") + resetReasonText() + "\n";
-    msg += "Waktu: " + formatTimeString() + "\n";
-    msg += "Tanggal: " + formatDateString() + "\n";
-    msg += "Mode: " + getCurrentModeText() + "\n";
-    msg += "Sleep mode alarm: " + String(alarmSleepMode ? "AKTIF" : "nonaktif") + "\n";
-    msg += "Alarm: " + String(alarmEnabled ? getCurrentAlarmText() : "off") + "\n";
-    msg += "Suhu: " + String(wTemp, 1) + "C\n";
-    msg += "RSSI: " + String(WiFi.RSSI()) + " dBm";
-    sendOwnerMessage(msg);
-    return;
-  }
-
-  // ── /cuaca ──────────────────────────────────────────
-  if (text.equalsIgnoreCase("/cuaca")) {
-    tgWeatherReq = true;              // dijawab setelah task latar belakang selesai mengambil data
-    nextWeatherAt = 0;
-    return;
-  }
-
-  // ── /mode jam|cuaca|wajah|info ──────────────────────
-  if (text.startsWith("/mode")) {
-    if (alarmSleepMode) {
-      sendOwnerMessage("Sistem sedang dalam mode hemat daya. Kirim /bangun dulu.");
-      return;
-    }
-    handleModeCommand(text.substring(5));
-    return;
-  }
-
-  // ── /brightness <0-255> ─────────────────────────────
-  if (text.startsWith("/brightness")) {
-    handleBrightnessCommand(text.substring(11));
-    return;
-  }
-
-  // ── /sleep HH:MM HH:MM ───────────────────────────────
-  if (text.startsWith("/sleep")) {
-    handleSleepWindowCommand(text.substring(6));
-    return;
-  }
-
-  // ── /start atau /help ────────────────────────────────
-  if (text.equalsIgnoreCase("/start") || text.equalsIgnoreCase("/help")) {
-    sendOwnerMessage(
-      "🤖 ESP32 SmartDisplay Bot\n\n"
-      "/alarm HH:MM - set alarm + mode hemat daya\n"
-      "/alarm off - batalkan alarm\n"
-      "/bangun - matikan siren & keluar mode hemat daya manual\n"
-      "/status - info sistem\n"
-      "/cuaca - cek cuaca sekarang\n"
-      "/mode jam|cuaca|wajah|info|prakiraan|sholat|emas - ganti tampilan OLED\n"
-      "/brightness 0-255 - atur kecerahan\n"
-      "/sleep HH:MM HH:MM - atur jadwal auto-sleep OLED\n"
-      "/deepsleep - matikan WiFi/web/bot (keluar: 3x klik tombol GPIO 4)"
-    );
-    return;
-  }
-
-  // Command tidak dikenal
-  sendOwnerMessage("Command tidak dikenal. Kirim /help untuk daftar perintah.");
 }
 
 // ═══════════════════════════════════════════════════════════
@@ -4821,7 +4446,7 @@ void pollButtons() {
     exitDeepSleepMode();
   }
 
-  bool canOpen = !alarmSleepMode && !oledSleepState && !wifiValidating;
+  bool canOpen = !oledSleepState && !wifiValidating;
   if (lng && canOpen)      openGames();
   else if (dbl && canOpen) openTools();
 
@@ -5347,10 +4972,10 @@ void toolLoop() {
 // DEEP SLEEP (ultra hemat daya, hanya di WIFI_MODE)
 // ═══════════════════════════════════════════════════════════
 // Minta masuk Deep Sleep. Masuk sebenarnya ditunda sebentar supaya balasan
-// web/Telegram sempat terkirim sebelum WiFi dimatikan.
+// web sempat terkirim sebelum WiFi dimatikan.
 bool requestDeepSleep() {
   if (deepSleepMode || deepSleepPending) return false;
-  if (systemMode != WIFI_MODE || wifiValidating || alarmSleepMode) return false;
+  if (systemMode != WIFI_MODE || wifiValidating) return false;
   deepSleepPending = true;
   deepSleepReqMs = millis();
   Serial.println("[DEEPSLEEP] Diminta, menunggu balasan terkirim...");
@@ -5361,15 +4986,13 @@ void updateDeepSleepPending() {
   if (!deepSleepPending) return;
   unsigned long el = millis() - deepSleepReqMs;
   if (el < 1500) return;
-  bool botIdle = (botOutgoingQueue == NULL) ||
-                 (uxQueueMessagesWaiting(botOutgoingQueue) == 0 && !botNetBusy);
-  if (botIdle || el > 10000) enterDeepSleepMode();
+  enterDeepSleepMode();
 }
 
 void enterDeepSleepMode() {
   deepSleepPending = false;
   if (deepSleepMode) return;
-  deepSleepMode = true;              // task bot berhenti akses jaringan
+  deepSleepMode = true;              // task latar berhenti akses jaringan
 
   stopWebServer();
   WiFi.disconnect(true, false);
@@ -5381,8 +5004,8 @@ void enterDeepSleepMode() {
   deepSleepPrevCpuMhz = getCpuFrequencyMhz();
   setCpuFrequencyMhz(80);            // tanpa WiFi, 80 MHz cukup (APB tetap 80 MHz, jam & I2C aman)
 
-  Serial.println("[DEEPSLEEP] AKTIF: WiFi, web & bot Telegram mati. Keluar: 3x klik tombol GPIO 4");
-  bootScreen("Deep Sleep AKTIF", "WiFi/Web/Bot OFF");
+  Serial.println("[DEEPSLEEP] AKTIF: WiFi & web mati. Keluar: 3x klik tombol GPIO 4");
+  bootScreen("Deep Sleep AKTIF", "WiFi/Web OFF");
   delay(1200);
 }
 

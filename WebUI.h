@@ -281,7 +281,7 @@ dd.mono{font:500 14px var(--mono)}
 <div class="panel feature" style="margin-bottom:14px"><div class="ic"><svg class="i"><use href="#i-nav"/></svg></div><div style="min-width:0"><b>MotoNav</b><p>Pindah ke navigasi lewat Bluetooth. Dashboard ini terputus selama mode navigasi.</p><button type="button" class="btn primary" id="navBtn">Mulai MotoNav</button></div></div>
 <div class="panel">
 <div class="row"><div class="gi"><svg class="i"><use href="#i-spk"/></svg></div><div class="t"><b>Tes buzzer</b><small>Bunyikan sebentar</small></div><button type="button" class="btn" id="beepBtn">Bunyikan</button></div>
-<div class="row"><div class="gi"><svg class="i"><use href="#i-moon"/></svg></div><div class="t"><b>Deep Sleep</b><small>Matikan WiFi, web, dan bot Telegram. Keluar: klik tombol GPIO 4 tiga kali cepat.</small></div><button type="button" class="btn" id="dsBtn">Aktifkan</button></div>
+<div class="row"><div class="gi"><svg class="i"><use href="#i-moon"/></svg></div><div class="t"><b>Deep Sleep</b><small>Matikan WiFi dan web. Keluar: klik tombol GPIO 4 tiga kali cepat.</small></div><button type="button" class="btn" id="dsBtn">Aktifkan</button></div>
 </div></section>
 
 <section class="sec"><h2>Jaringan WiFi</h2><div class="panel wl">
@@ -431,7 +431,7 @@ $('eyeSave').addEventListener('click',function(){var v=ev();$('eyeMin').value=v[
 function halt(t,x){halted=true;clearInterval(timer);$('conn').className='pill off';$('connTxt').textContent=t;$('banTitle').textContent=t;$('banText').textContent=x;$('banBtn').hidden=!demo;$('banner').hidden=false;window.scrollTo(0,0)}
 $('banBtn').addEventListener('click',function(){halted=false;$('banner').hidden=true;start()});
 $('navBtn').addEventListener('click',function(){ask('Mulai MotoNav?','ESP32 pindah ke mode Bluetooth dan dashboard ini terputus. Kembali lewat perintah dari aplikasi MotoNav.','Mulai').then(function(ok){if(!ok)return;get('/switchnav').then(function(){halt('MotoNav aktif','ESP32 dalam mode navigasi Bluetooth. Dashboard terputus sampai kembali ke mode WiFi.')},function(){toast('Perangkat tidak merespons','bad')})})});
-$('dsBtn').addEventListener('click',function(){ask('Aktifkan Deep Sleep?','WiFi, dashboard, dan bot Telegram dimatikan. Keluar dengan klik tombol GPIO 4 tiga kali cepat.','Aktifkan').then(function(ok){if(!ok)return;get('/deepsleep').then(function(r){if(!r.ok){toast('Deep sleep belum bisa diaktifkan sekarang','bad');return}halt('Deep Sleep aktif','WiFi dimatikan. Klik tombol GPIO 4 tiga kali cepat untuk keluar, lalu muat ulang halaman ini.')},function(){toast('Perangkat tidak merespons','bad')})})});
+$('dsBtn').addEventListener('click',function(){ask('Aktifkan Deep Sleep?','WiFi dan dashboard dimatikan. Keluar dengan klik tombol GPIO 4 tiga kali cepat.','Aktifkan').then(function(ok){if(!ok)return;get('/deepsleep').then(function(r){if(!r.ok){toast('Deep sleep belum bisa diaktifkan sekarang','bad');return}halt('Deep Sleep aktif','WiFi dimatikan. Klik tombol GPIO 4 tiga kali cepat untuk keluar, lalu muat ulang halaman ini.')},function(){toast('Perangkat tidak merespons','bad')})})});
 $('pwToggle').addEventListener('click',function(){var p=$('wifiPASS'),h=p.type=='password';p.type=h?'text':'password';this.textContent=h?'Sembunyikan':'Tampilkan'});
 $('wifiBtn').addEventListener('click',function(){var s=$('wifiSSID').value.trim(),p=$('wifiPASS').value.trim(),m=$('wifiMsg');
 if(!s){m.className='msg bad';m.textContent='Nama WiFi tidak boleh kosong.';return}
