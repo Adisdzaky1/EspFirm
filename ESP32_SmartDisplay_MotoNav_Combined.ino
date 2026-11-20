@@ -44,7 +44,7 @@ struct EyeEnt { char name[16]; uint16_t frames; uint32_t off; uint32_t size; };
 #define DASH_URL2    "https://cdn.jsdelivr.net/gh/Adisdzaky1/EspFirm@main/firmware/dashboard.html"   // cadangan
 #define EYE_BIN_PATH "/eyegifs.bin"
 #define EYE_TMP_PATH "/eyegifs.tmp"
-#define EYE_FRAME_MAX 768          // ukuran terbesar 1 frame terkompresi (data saat ini maks 707)
+#define EYE_FRAME_MAX 1100         // ukuran terbesar 1 frame terkompresi (layar 128x64 maks 1024 mentah + header)
 
 // Halaman pengantar kecil yang disajikan ESP32 di "/": memuat dashboard dari GitHub (disimpan di browser
 // supaya tetap bisa dibuka tanpa internet) atau, bila belum pernah berhasil, menampilkan form WiFi darurat.
@@ -3010,18 +3010,20 @@ void drawPrayerAlert() {
 bool eyeLoadTable() {
   eyeReady = false;
   if (eyeFile) eyeFile.close();
-  if (!eyeFsOk || !LittleFS.exists(EYE_BIN_PATH)) return false;
+  if (!eyeFsOk || !LittleFS.exists(EYE_BIN_PATH)) { eyeDlErr = "Berkas hilang"; return false; }
   eyeFile = LittleFS.open(EYE_BIN_PATH, "r");
   if (!eyeFile) return false;
   uint8_t h[16];
-  if (eyeFile.read(h, 16) != 16 || memcmp(h, "EYG1", 4) != 0) { eyeFile.close(); return false; }
+  if (eyeFile.read(h, 16) != 16 || memcmp(h, "EYG1", 4) != 0) { eyeDlErr = "Header salah"; eyeFile.close(); return false; }
   int n = h[4] | (h[5] << 8);
   int blank = h[6] | (h[7] << 8);
   int maxf = h[8] | (h[9] << 8);
   uint32_t total = (uint32_t)h[12] | ((uint32_t)h[13] << 8) | ((uint32_t)h[14] << 16) | ((uint32_t)h[15] << 24);
-  if (n < 2 || n > 200 || blank >= n || maxf > EYE_FRAME_MAX || total != (uint32_t)eyeFile.size()) { eyeFile.close(); return false; }
+  if (n < 2 || n > 200 || blank >= n) { eyeDlErr = "Jumlah anim " + String(n); eyeFile.close(); return false; }
+  if (maxf > EYE_FRAME_MAX) { eyeDlErr = "Frame maks " + String(maxf); eyeFile.close(); return false; }
+  if (total != (uint32_t)eyeFile.size()) { eyeDlErr = "Ukuran tak cocok"; eyeFile.close(); return false; }
   EyeEnt *t = (EyeEnt*)realloc(eyeTab, n * sizeof(EyeEnt));
-  if (!t) { eyeFile.close(); return false; }
+  if (!t) { eyeDlErr = "Memori tabel"; eyeFile.close(); return false; }
   eyeTab = t;
   uint8_t e[28];
   for (int i = 0; i < n; i++) {
@@ -3031,7 +3033,7 @@ bool eyeLoadTable() {
     eyeTab[i].frames = (uint16_t)(e[16] | (e[17] << 8));
     eyeTab[i].off  = (uint32_t)e[20] | ((uint32_t)e[21] << 8) | ((uint32_t)e[22] << 16) | ((uint32_t)e[23] << 24);
     eyeTab[i].size = (uint32_t)e[24] | ((uint32_t)e[25] << 8) | ((uint32_t)e[26] << 16) | ((uint32_t)e[27] << 24);
-    if (eyeTab[i].frames == 0 || eyeTab[i].off + eyeTab[i].size > total) { eyeFile.close(); return false; }
+    if (eyeTab[i].frames == 0 || eyeTab[i].off + eyeTab[i].size > total) { eyeDlErr = "Tabel rusak #" + String(i); eyeFile.close(); return false; }
   }
   eyeCount = n;
   eyeBlank = blank;
@@ -3451,7 +3453,7 @@ void setupWizardTick() {
       }
       eyeDlTry++;
       bool ok = eyeDownload();
-      if (ok && eyeLoadTable()) { setupStep = 2; return; }
+      if (ok) { if (eyeLoadTable()) { setupStep = 2; return; } if (!eyeDlErr.length()) eyeDlErr = "Muat tabel gagal"; }
       Serial.println("[SETUP] Unduh gagal: " + eyeDlErr);
       if (eyeDlTry >= 3) {
         eyeDlFailed = true;
