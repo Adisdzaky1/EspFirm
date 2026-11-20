@@ -708,7 +708,7 @@ void setup() {
     enterWiFiMode();
   }
 
-  xTaskCreatePinnedToCore(onlineTask, "OnlineFetch", 16384, NULL, 1, &onlineTaskHandle, 0);
+  if (!setupActive) startOnlineTask();   // saat wizard aktif, task dibuat setelah selesai (hemat 16 KB heap)
   Serial.println("[BOOT] Setup selesai");
 }
 
@@ -2000,6 +2000,11 @@ void updateOnlineData() {
 
 
 // Task latar belakang (core 0, core 0): semua operasi jaringan yang bisa memakan waktu
+void startOnlineTask() {
+  if (onlineTaskHandle) return;
+  xTaskCreatePinnedToCore(onlineTask, "OnlineFetch", 16384, NULL, 1, &onlineTaskHandle, 0);
+}
+
 void onlineTask(void *pv) {
   for (;;) {
     if (systemMode == WIFI_MODE && !deepSleepMode) {
@@ -3332,7 +3337,11 @@ static bool eyeDownload() {
   eyeDlGot = 0;
   eyeDlTotal = 0;
   if (!eyeFsOk) { eyeDlErr = "LittleFS gagal"; return false; }
-  if (heap_caps_get_largest_free_block(MALLOC_CAP_8BIT) < 45000) { eyeDlErr = "Memori kurang"; return false; }
+  {
+    uint32_t lb = heap_caps_get_largest_free_block(MALLOC_CAP_8BIT), fh = ESP.getFreeHeap();
+    Serial.printf("[SETUP] heap free=%u largest=%u\n", (unsigned)fh, (unsigned)lb);
+    if (lb < 22000 || fh < 40000) { eyeDlErr = "Memori " + String(lb / 1024) + "K"; return false; }
+  }
   setupDrawEyes();
   WiFiClientSecure cl;
   cl.setInsecure();
@@ -3415,6 +3424,7 @@ static void setupFinish(bool skipped) {
   if (skipped) prefs.putBool("eyeSkip", true);
   setupActive = false;
   eyeStarted = false;
+  startOnlineTask();
   Serial.println(skipped ? "[SETUP] Dilewati" : "[SETUP] Selesai");
 }
 
