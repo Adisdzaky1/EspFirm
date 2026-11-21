@@ -44,7 +44,7 @@ struct TrkMap { float s, cx, cy, mx, my; };   // skala, pusat jejak (meter), pus
 #define GH_REPO     "Ino"                           // nama repo
 #define GH_BRANCH   "main"
 #define GH_DIR      "tracks"                       // folder tujuan di repo
-#define GH_TOKEN    "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"                             // fine-grained token, izin Contents: Read and write (hanya repo ini)
+#define GH_TOKEN    "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"                             // fine-grained token, izin Contents: Read and write (hanya repo ini)
 // ───────────────────────────────────────────────────────────────────
 
 #define SCREEN_WIDTH  128
