@@ -37,14 +37,14 @@ struct TrkMap { float s, cx, cy, mx, my; };   // skala, pusat jejak (meter), pus
 #define BT_DEVICE_NAME    "ESP32 Jejak"            // nama Bluetooth ESP32
 #define TRK_PHONE_DEFAULT "08:10:93:38:97:24"      // alamat Bluetooth HP penyedia GPS (atau nama HP)
 
-#define WIFI_SSID   ""                             // WiFi untuk sinkron jam & unggah ke GitHub
-#define WIFI_PASS   ""
+#define WIFI_SSID   "Adis 4G"                             // WiFi untuk sinkron jam & unggah ke GitHub
+#define WIFI_PASS   "monalisa"
 
-#define GH_OWNER    ""                             // username GitHub pemilik repo
-#define GH_REPO     ""                             // nama repo
+#define GH_OWNER    "Adisdzaky1"                             // username GitHub pemilik repo
+#define GH_REPO     "Ino"                           // nama repo
 #define GH_BRANCH   "main"
 #define GH_DIR      "tracks"                       // folder tujuan di repo
-#define GH_TOKEN    ""                             // fine-grained token, izin Contents: Read and write (hanya repo ini)
+#define GH_TOKEN    "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"                             // fine-grained token, izin Contents: Read and write (hanya repo ini)
 // ───────────────────────────────────────────────────────────────────
 
 #define SCREEN_WIDTH  128
