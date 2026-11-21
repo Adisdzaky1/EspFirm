@@ -29,6 +29,8 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 
+SET_LOOP_TASK_STACK_SIZE(24 * 1024);   // TLS (unggah GitHub) di loop() butuh stack besar; bawaan 8 KB -> crash
+
 // Tipe data jejak: harus di sini (sebelum semua prototipe fungsi yang dibuat otomatis oleh Arduino)
 struct TrkPt { float x, y; };                 // meter dari titik awal (x = timur, y = utara)
 struct TrkMap { float s, cx, cy, mx, my; };   // skala, pusat jejak (meter), pusat kotak (piksel)
